@@ -76,7 +76,8 @@ function createSurface(name, viewport, canvas) {
         pinchAnchorX: 0,
         pinchAnchorY: 0,
         isDragging: false,
-        clickSuppressed: false
+        clickSuppressed: false,
+        renderFrame: 0
     };
 
     bindSurfaceEvents(surface);
@@ -87,10 +88,10 @@ function createSurface(name, viewport, canvas) {
 
 function bindGlobalEvents(modal, modalClose) {
     const debouncedResize = debounce(() => {
-        renderAlbumGrid(false);
+        relayoutSurface(state.surfaces.app, state.albumCards, getAlbumHeight);
 
         if (state.activeAlbum) {
-            renderModalGrid(state.activeAlbum, false);
+            relayoutSurface(state.surfaces.modal, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
         }
     }, 160);
 
@@ -129,6 +130,16 @@ function bindGlobalEvents(modal, modalClose) {
     });
 }
 
+function relayoutSurface(surface, cards, heightGetter, topOffset = GAP) {
+    if (!surface || !cards.length) {
+        return;
+    }
+
+    layoutCards(surface, cards, heightGetter, topOffset);
+    clampSurfacePosition(surface);
+    updateSurfaceTransform(surface);
+}
+
 function bindSurfaceEvents(surface) {
     surface.viewport.addEventListener(
         'click',
@@ -152,8 +163,6 @@ function bindSurfaceEvents(surface) {
             x: event.clientX,
             y: event.clientY
         });
-
-        surface.viewport.setPointerCapture(event.pointerId);
 
         if (surface.activePointers.size >= 2) {
             beginSurfacePinch(surface);
@@ -193,6 +202,8 @@ function bindSurfaceEvents(surface) {
         if (!surface.isDragging && Math.hypot(deltaX, deltaY) >= DRAG_THRESHOLD) {
             surface.isDragging = true;
             surface.clickSuppressed = true;
+            ensurePointerCapture(surface, event.pointerId);
+            surface.viewport.classList.add('is-dragging');
         }
 
         if (!surface.isDragging) {
@@ -314,6 +325,7 @@ function createAlbumCard(album) {
     card.setAttribute('tabindex', '0');
     card.setAttribute('aria-label', album.title || 'Open album');
     card.dataset.aspectRatio = String(getAspectRatio(getAlbumAspectRatio(album)));
+    card.style.setProperty('--card-accent', getAccentColor(album.title || String(album.id || 'album')));
 
     const img = buildImageNode(getCoverSrc(album), album.title || 'Album cover');
     const overlay = document.createElement('div');
@@ -342,6 +354,7 @@ function createAlbumCard(album) {
 function createImageCard(image) {
     const card = buildCardShell();
     card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
+    card.style.setProperty('--card-accent', getAccentColor(image.src || 'image'));
     card.appendChild(buildImageNode(image.src, 'Album image'));
     return card;
 }
@@ -566,11 +579,18 @@ function clampSurfacePosition(surface) {
 }
 
 function updateSurfaceTransform(surface) {
-    surface.canvas.style.transform = `translate(${surface.x}px, ${surface.y}px) scale(${surface.scale})`;
-
-    if (surface.zoomLabel) {
-        surface.zoomLabel.textContent = `${Math.round(surface.scale * 100)}%`;
+    if (surface.renderFrame) {
+        return;
     }
+
+    surface.renderFrame = window.requestAnimationFrame(() => {
+        surface.renderFrame = 0;
+        surface.canvas.style.transform = `translate3d(${surface.x}px, ${surface.y}px, 0) scale(${surface.scale})`;
+
+        if (surface.zoomLabel) {
+            surface.zoomLabel.textContent = `${Math.round(surface.scale * 100)}%`;
+        }
+    });
 }
 
 function beginSurfaceDrag(surface, pointerId, clientX, clientY) {
@@ -581,7 +601,7 @@ function beginSurfaceDrag(surface, pointerId, clientX, clientY) {
     surface.startY = surface.y;
     surface.isDragging = false;
     surface.isPinching = false;
-    surface.viewport.classList.add('is-dragging');
+    surface.viewport.classList.remove('is-dragging');
 }
 
 function beginSurfacePinch(surface) {
@@ -601,6 +621,8 @@ function beginSurfacePinch(surface) {
     surface.isPinching = true;
     surface.clickSuppressed = true;
     surface.viewport.classList.add('is-dragging');
+    ensurePointerCapture(surface, pointers[0].id);
+    ensurePointerCapture(surface, pointers[1].id);
     surface.pinchStartDistance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
     surface.pinchStartScale = surface.scale;
     surface.pinchAnchorX = (localX - surface.x) / surface.scale;
@@ -648,6 +670,12 @@ function getPointerMidpoint(firstPointer, secondPointer) {
     };
 }
 
+function ensurePointerCapture(surface, pointerId) {
+    if (!surface.viewport.hasPointerCapture(pointerId)) {
+        surface.viewport.setPointerCapture(pointerId);
+    }
+}
+
 function releaseSurfacePointer(surface, pointerId) {
     if (surface.viewport.hasPointerCapture(pointerId)) {
         surface.viewport.releasePointerCapture(pointerId);
@@ -681,6 +709,21 @@ function isPrimaryPointer(event) {
 
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
+}
+
+function getAccentColor(seed) {
+    const hue = hashString(seed) % 360;
+    return `hsl(${hue} 94% 64%)`;
+}
+
+function hashString(value) {
+    let hash = 0;
+
+    for (let index = 0; index < value.length; index += 1) {
+        hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+    }
+
+    return hash;
 }
 
 function debounce(func, wait) {
