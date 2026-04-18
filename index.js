@@ -417,10 +417,10 @@ function openAlbum(album) {
     }
 
     state.activeAlbum = album;
-    renderModalGrid(album);
     modal.classList.add('is-open');
     modal.setAttribute('aria-hidden', 'false');
     document.body.classList.add('modal-open');
+    renderModalGrid(album);
 }
 
 function closeModal(modal) {
