@@ -5,11 +5,12 @@ const MODAL_TOP_OFFSET = 72;
 const SURFACE_PADDING = 80;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 3;
-const ZOOM_STEP = 1.2;
-const WHEEL_ZOOM_SENSITIVITY = 0.0018;
-const VIEW_ANIMATION_DURATION = 220;
+const ZOOM_STEP = 1.3;
+const WHEEL_ZOOM_SENSITIVITY = 0.0026;
+const VIEW_ANIMATION_DURATION = 160;
+const SLIDESHOW_SETTLE_DURATION = 220;
 const DRAG_THRESHOLD = 6;
-const PINCH_ZOOM_EXPONENT = 1.45;
+const PINCH_ZOOM_EXPONENT = 1.75;
 const SLIDESHOW_TRIGGER_SCALE = MAX_SCALE * 0.985;
 const SLIDESHOW_EXIT_SCALE = 2.2;
 const APP_TIP_STORAGE_KEY = 'morebeauty.appTipHidden';
@@ -90,7 +91,9 @@ function createSurface(name, viewport, canvas) {
         renderFrame: 0,
         viewAnimationFrame: 0,
         isSlideshow: false,
-        slideshowIndex: 0
+        isSlideshowSettled: false,
+        slideshowIndex: 0,
+        slideshowSettleTimer: 0
     };
 
     bindSurfaceEvents(surface);
@@ -385,6 +388,7 @@ function renderModalGrid(album, shouldReset = true) {
 
     clearCanvas(surface.canvas);
     surface.isSlideshow = false;
+    surface.isSlideshowSettled = false;
     surface.slideshowIndex = 0;
     syncSlideshowState(surface, modal);
 
@@ -432,6 +436,7 @@ function closeModal(modal) {
     document.body.classList.remove('modal-open');
     clearCanvas(state.surfaces.modal.canvas);
     state.surfaces.modal.isSlideshow = false;
+    state.surfaces.modal.isSlideshowSettled = false;
     state.surfaces.modal.slideshowIndex = 0;
     syncSlideshowState(state.surfaces.modal, modal);
     setEmptySurface(state.surfaces.modal);
@@ -935,7 +940,9 @@ function enterSlideshowMode(surface, focusContentX, focusContentY) {
     const activeIndex = getClosestCardIndex(state.modalCards, focusContentX, focusContentY);
 
     surface.isSlideshow = true;
+    surface.isSlideshowSettled = false;
     layoutSlideshow(surface, state.modalCards, activeIndex);
+    scheduleSlideshowSettle(surface);
 }
 
 function exitSlideshowMode(surface, animate = false) {
@@ -946,6 +953,7 @@ function exitSlideshowMode(surface, animate = false) {
         return;
     }
 
+    clearSlideshowSettle(surface);
     renderModalGrid(album, false);
     surface.slideshowIndex = activeIndex;
 
@@ -994,6 +1002,7 @@ function navigateSlideshow(surface, direction, animate = false) {
 function syncSlideshowState(surface, modal) {
     if (modal) {
         modal.classList.toggle('is-slideshow', surface.isSlideshow);
+        modal.classList.toggle('is-slideshow-settled', surface.isSlideshow && surface.isSlideshowSettled);
     }
 
     if (surface.slideCounter) {
@@ -1001,6 +1010,24 @@ function syncSlideshowState(surface, modal) {
         const current = Math.min(surface.slideshowIndex + 1, total);
         surface.slideCounter.textContent = `${current} / ${total}`;
     }
+}
+
+function scheduleSlideshowSettle(surface) {
+    clearSlideshowSettle(surface);
+    surface.slideshowSettleTimer = window.setTimeout(() => {
+        surface.isSlideshowSettled = true;
+        syncSlideshowState(surface, document.getElementById('modal'));
+        surface.slideshowSettleTimer = 0;
+    }, SLIDESHOW_SETTLE_DURATION);
+}
+
+function clearSlideshowSettle(surface) {
+    if (!surface.slideshowSettleTimer) {
+        return;
+    }
+
+    window.clearTimeout(surface.slideshowSettleTimer);
+    surface.slideshowSettleTimer = 0;
 }
 
 function getClosestCardIndex(cards, focusX, focusY) {

@@ -189,6 +189,7 @@
             display: none;
             background: rgba(243, 238, 231, 0.86);
             backdrop-filter: blur(14px);
+            transition: background 0.28s ease, backdrop-filter 0.28s ease;
         }
 
         .modal-layer.is-open {
@@ -197,16 +198,23 @@
 
         .modal-layer.is-slideshow .surface-viewport {
             background: linear-gradient(180deg, rgba(18, 16, 12, 0.9), rgba(34, 29, 24, 0.92));
+            transition: background 0.28s ease;
         }
 
         .slideshow-controls {
-            display: none;
+            display: flex;
             align-items: center;
             gap: 8px;
+            opacity: 0;
+            transform: translateY(8px);
+            pointer-events: none;
+            transition: opacity 0.22s ease, transform 0.22s ease;
         }
 
         .modal-layer.is-slideshow .slideshow-controls {
-            display: flex;
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: auto;
         }
 
         .slideshow-counter {
@@ -228,6 +236,17 @@
             contain: layout paint;
         }
 
+        .modal-layer .card {
+            transition:
+                left 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                top 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                height 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                border-radius 0.24s ease,
+                box-shadow 0.24s ease,
+                background 0.24s ease;
+        }
+
         .card::after {
             content: "";
             position: absolute;
@@ -246,6 +265,10 @@
             object-fit: cover;
             background: #ece7e0;
             pointer-events: none;
+        }
+
+        .modal-layer .card img {
+            transition: filter 0.24s ease, opacity 0.24s ease, transform 0.28s ease;
         }
 
         .album-card {
@@ -291,6 +314,7 @@
             font-size: 22px;
             font-weight: 700;
             letter-spacing: 0.01em;
+            transition: color 0.24s ease, text-shadow 0.24s ease, opacity 0.24s ease;
         }
 
         .modal-layer.is-slideshow .modal-title {
@@ -298,12 +322,12 @@
             text-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
         }
 
-        .modal-layer.is-slideshow .card {
+        .modal-layer.is-slideshow-settled .card {
             background: transparent;
             box-shadow: none;
         }
 
-        .modal-layer.is-slideshow .card img {
+        .modal-layer.is-slideshow-settled .card img {
             object-fit: contain;
             background: transparent;
         }
