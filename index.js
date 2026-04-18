@@ -9,6 +9,9 @@ const ZOOM_STEP = 1.2;
 const WHEEL_ZOOM_SENSITIVITY = 0.0018;
 const VIEW_ANIMATION_DURATION = 220;
 const DRAG_THRESHOLD = 6;
+const PINCH_ZOOM_EXPONENT = 1.45;
+const SLIDESHOW_TRIGGER_SCALE = MAX_SCALE * 0.985;
+const SLIDESHOW_EXIT_SCALE = 2.2;
 const APP_TIP_STORAGE_KEY = 'morebeauty.appTipHidden';
 
 const state = {
@@ -59,11 +62,13 @@ async function init() {
 
 function createSurface(name, viewport, canvas) {
     const zoomLabel = document.querySelector(`[data-zoom-label="${name}"]`);
+    const slideCounter = name === 'modal' ? document.getElementById('modal-slide-counter') : null;
     const surface = {
         name,
         viewport,
         canvas,
         zoomLabel,
+        slideCounter,
         scale: 1,
         x: 0,
         y: 0,
@@ -83,7 +88,9 @@ function createSurface(name, viewport, canvas) {
         isDragging: false,
         clickSuppressed: false,
         renderFrame: 0,
-        viewAnimationFrame: 0
+        viewAnimationFrame: 0,
+        isSlideshow: false,
+        slideshowIndex: 0
     };
 
     bindSurfaceEvents(surface);
@@ -105,6 +112,17 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
     window.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeModal(modal);
+            return;
+        }
+
+        if (!state.surfaces.modal.isSlideshow) {
+            return;
+        }
+
+        if (event.key === 'ArrowRight') {
+            navigateSlideshow(state.surfaces.modal, 1, true);
+        } else if (event.key === 'ArrowLeft') {
+            navigateSlideshow(state.surfaces.modal, -1, true);
         }
     });
 
@@ -135,13 +153,32 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
             }
 
             if (button.dataset.action === 'zoom-in') {
+                if (surface.isSlideshow) {
+                    return;
+                }
                 zoomSurfaceByStep(surface, ZOOM_STEP, true);
             } else if (button.dataset.action === 'zoom-out') {
+                if (surface.isSlideshow) {
+                    exitSlideshowMode(surface, true);
+                    return;
+                }
                 zoomSurfaceByStep(surface, 1 / ZOOM_STEP, true);
             } else if (button.dataset.action === 'fit') {
+                if (surface.isSlideshow) {
+                    exitSlideshowMode(surface, true);
+                    return;
+                }
                 fitSurface(surface, true);
             } else if (button.dataset.action === 'reset') {
+                if (surface.isSlideshow) {
+                    exitSlideshowMode(surface, true);
+                    return;
+                }
                 resetSurface(surface, true);
+            } else if (button.dataset.action === 'prev-slide') {
+                navigateSlideshow(surface, -1, true);
+            } else if (button.dataset.action === 'next-slide') {
+                navigateSlideshow(surface, 1, true);
             }
         });
     });
@@ -149,6 +186,11 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
 
 function relayoutSurface(surface, cards, heightGetter, topOffset = GAP) {
     if (!surface || !cards.length) {
+        return;
+    }
+
+    if (surface.isSlideshow && surface.name === 'modal') {
+        layoutSlideshow(surface, cards, surface.slideshowIndex);
         return;
     }
 
@@ -200,6 +242,40 @@ function bindSurfaceEvents(surface) {
             y: event.clientY
         });
 
+        if (surface.isSlideshow) {
+            if (surface.activePointers.size >= 2) {
+                const pointers = getTrackedPointers(surface);
+
+                if (!surface.isPinching) {
+                    beginSurfacePinch(surface);
+                }
+
+                const distance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
+
+                if (distance / surface.pinchStartDistance < 0.88) {
+                    exitSlideshowMode(surface, true);
+                }
+
+                return;
+            }
+
+            if (surface.pointerId !== event.pointerId) {
+                return;
+            }
+
+            const deltaX = event.clientX - surface.startPointerX;
+            const deltaY = event.clientY - surface.startPointerY;
+
+            if (Math.abs(deltaX) > 56 && Math.abs(deltaX) > Math.abs(deltaY)) {
+                navigateSlideshow(surface, deltaX < 0 ? 1 : -1, true);
+                surface.startPointerX = event.clientX;
+                surface.startPointerY = event.clientY;
+                surface.clickSuppressed = true;
+            }
+
+            return;
+        }
+
         if (surface.activePointers.size >= 2) {
             if (!surface.isPinching) {
                 beginSurfacePinch(surface);
@@ -245,6 +321,23 @@ function bindSurfaceEvents(surface) {
         event.preventDefault();
         stopSurfaceAnimation(surface);
 
+        if (surface.isSlideshow) {
+            if (event.ctrlKey || event.metaKey) {
+                if (getNormalizedWheelDelta(event) > 0) {
+                    exitSlideshowMode(surface, true);
+                }
+                return;
+            }
+
+            const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+
+            if (Math.abs(horizontalDelta) > 8) {
+                navigateSlideshow(surface, horizontalDelta > 0 ? 1 : -1, true);
+            }
+
+            return;
+        }
+
         if (event.ctrlKey || event.metaKey) {
             const factor = Math.exp(-getNormalizedWheelDelta(event) * WHEEL_ZOOM_SENSITIVITY);
             zoomSurface(surface, surface.scale * factor, event.clientX, event.clientY);
@@ -288,8 +381,12 @@ function renderAlbumGrid(shouldReset = true) {
 
 function renderModalGrid(album, shouldReset = true) {
     const surface = state.surfaces.modal;
+    const modal = document.getElementById('modal');
 
     clearCanvas(surface.canvas);
+    surface.isSlideshow = false;
+    surface.slideshowIndex = 0;
+    syncSlideshowState(surface, modal);
 
     const title = document.createElement('div');
     title.className = 'modal-title';
@@ -330,9 +427,13 @@ function closeModal(modal) {
     state.activeAlbum = null;
     state.modalCards = [];
     modal.classList.remove('is-open');
+    modal.classList.remove('is-slideshow');
     modal.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('modal-open');
     clearCanvas(state.surfaces.modal.canvas);
+    state.surfaces.modal.isSlideshow = false;
+    state.surfaces.modal.slideshowIndex = 0;
+    syncSlideshowState(state.surfaces.modal, modal);
     setEmptySurface(state.surfaces.modal);
 }
 
@@ -421,6 +522,42 @@ function layoutCards(surface, cards, heightGetter, topOffset = GAP) {
     surface.contentHeight = Math.max(Math.max(...columnHeights), surface.viewport.clientHeight);
     surface.canvas.style.width = `${surface.contentWidth}px`;
     surface.canvas.style.height = `${surface.contentHeight}px`;
+}
+
+function layoutSlideshow(surface, cards, activeIndex = 0) {
+    const viewportWidth = surface.viewport.clientWidth;
+    const viewportHeight = surface.viewport.clientHeight;
+    const safeTop = MODAL_TOP_OFFSET + 28;
+    const slideWidth = viewportWidth;
+    const slideHeight = viewportHeight;
+    const frameWidth = Math.max(240, viewportWidth - SURFACE_PADDING * 2);
+    const frameHeight = Math.max(180, viewportHeight - safeTop - SURFACE_PADDING);
+
+    cards.forEach((card, index) => {
+        const aspectRatio = getAspectRatio(card.dataset.aspectRatio);
+        const widthByHeight = frameHeight * aspectRatio;
+        const heightByWidth = frameWidth / aspectRatio;
+        const width = Math.min(frameWidth, widthByHeight);
+        const height = Math.min(frameHeight, heightByWidth);
+        const slideX = index * slideWidth;
+        const left = slideX + Math.round((slideWidth - width) / 2);
+        const top = safeTop + Math.max(0, Math.round((frameHeight - height) / 2));
+
+        card.style.width = `${width}px`;
+        card.style.height = `${height}px`;
+        card.style.left = `${left}px`;
+        card.style.top = `${top}px`;
+    });
+
+    surface.contentWidth = cards.length * slideWidth;
+    surface.contentHeight = slideHeight;
+    surface.canvas.style.width = `${surface.contentWidth}px`;
+    surface.canvas.style.height = `${surface.contentHeight}px`;
+    surface.scale = 1;
+    surface.y = 0;
+    surface.slideshowIndex = clamp(activeIndex, 0, Math.max(cards.length - 1, 0));
+    syncSlideshowState(surface, document.getElementById('modal'));
+    setSurfaceView(surface, 1, -surface.slideshowIndex * slideWidth, 0, true);
 }
 
 function getLayoutMetrics(containerWidth) {
@@ -566,6 +703,12 @@ function zoomSurface(surface, nextScale, clientX, clientY, animate = false) {
     const localY = clientY - rect.top;
     const contentX = (localX - surface.x) / surface.scale;
     const contentY = (localY - surface.y) / surface.scale;
+
+    if (shouldEnterSlideshow(surface, boundedScale)) {
+        enterSlideshowMode(surface, contentX, contentY);
+        return;
+    }
+
     const x = localX - contentX * boundedScale;
     const y = localY - contentY * boundedScale;
 
@@ -628,6 +771,12 @@ function clampSurfacePosition(surface) {
     const viewportHeight = surface.viewport.clientHeight;
     const scaledWidth = surface.contentWidth * surface.scale;
     const scaledHeight = surface.contentHeight * surface.scale;
+
+    if (surface.isSlideshow) {
+        surface.x = clamp(surface.x, viewportWidth - scaledWidth, 0);
+        surface.y = 0;
+        return;
+    }
 
     if (scaledWidth <= viewportWidth - SURFACE_PADDING) {
         surface.x = Math.round((viewportWidth - scaledWidth) / 2);
@@ -712,10 +861,15 @@ function updateSurfacePinch(surface) {
     const localY = midpoint.y - rect.top;
     const distance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
     const nextScale = clamp(
-        surface.pinchStartScale * (distance / surface.pinchStartDistance),
+        surface.pinchStartScale * Math.pow(distance / surface.pinchStartDistance, PINCH_ZOOM_EXPONENT),
         MIN_SCALE,
         MAX_SCALE
     );
+
+    if (shouldEnterSlideshow(surface, nextScale)) {
+        enterSlideshowMode(surface, surface.pinchAnchorX, surface.pinchAnchorY);
+        return;
+    }
 
     surface.scale = nextScale;
     surface.x = localX - surface.pinchAnchorX * nextScale;
@@ -771,6 +925,115 @@ function releaseSurfacePointer(surface, pointerId) {
     window.setTimeout(() => {
         surface.clickSuppressed = false;
     }, 0);
+}
+
+function shouldEnterSlideshow(surface, scale) {
+    return surface.name === 'modal' && !surface.isSlideshow && state.modalCards.length > 0 && scale >= SLIDESHOW_TRIGGER_SCALE;
+}
+
+function enterSlideshowMode(surface, focusContentX, focusContentY) {
+    const activeIndex = getClosestCardIndex(state.modalCards, focusContentX, focusContentY);
+
+    surface.isSlideshow = true;
+    layoutSlideshow(surface, state.modalCards, activeIndex);
+}
+
+function exitSlideshowMode(surface, animate = false) {
+    const album = state.activeAlbum;
+    const activeIndex = surface.slideshowIndex;
+
+    if (!album || !surface.isSlideshow) {
+        return;
+    }
+
+    renderModalGrid(album, false);
+    surface.slideshowIndex = activeIndex;
+
+    if (animate) {
+        const focusedCard = state.modalCards[activeIndex] || state.modalCards[0];
+
+        if (focusedCard) {
+            focusCardInGrid(surface, focusedCard, SLIDESHOW_EXIT_SCALE);
+        } else {
+            resetSurface(surface, true);
+        }
+    } else {
+        resetSurface(surface);
+    }
+}
+
+function focusCardInGrid(surface, card, scale) {
+    const rect = surface.viewport.getBoundingClientRect();
+    const cardCenterX = Number(card.style.left.replace('px', '')) + Number(card.style.width.replace('px', '')) / 2;
+    const cardCenterY = Number(card.style.top.replace('px', '')) + Number(card.style.height.replace('px', '')) / 2;
+    const viewportCenterX = rect.width / 2;
+    const viewportCenterY = rect.height / 2;
+    const nextScale = clamp(scale, MIN_SCALE, MAX_SCALE);
+    const x = viewportCenterX - cardCenterX * nextScale;
+    const y = viewportCenterY - cardCenterY * nextScale;
+
+    setSurfaceView(surface, nextScale, x, y, true);
+}
+
+function navigateSlideshow(surface, direction, animate = false) {
+    if (!surface.isSlideshow || !state.modalCards.length) {
+        return;
+    }
+
+    const nextIndex = clamp(surface.slideshowIndex + direction, 0, state.modalCards.length - 1);
+
+    if (nextIndex === surface.slideshowIndex) {
+        return;
+    }
+
+    surface.slideshowIndex = nextIndex;
+    syncSlideshowState(surface, document.getElementById('modal'));
+    setSurfaceView(surface, 1, -nextIndex * surface.viewport.clientWidth, 0, animate);
+}
+
+function syncSlideshowState(surface, modal) {
+    if (modal) {
+        modal.classList.toggle('is-slideshow', surface.isSlideshow);
+    }
+
+    if (surface.slideCounter) {
+        const total = state.modalCards.length || 1;
+        const current = Math.min(surface.slideshowIndex + 1, total);
+        surface.slideCounter.textContent = `${current} / ${total}`;
+    }
+}
+
+function getClosestCardIndex(cards, focusX, focusY) {
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    cards.forEach((card, index) => {
+        const left = Number(card.style.left.replace('px', ''));
+        const top = Number(card.style.top.replace('px', ''));
+        const width = Number(card.style.width.replace('px', ''));
+        const height = Number(card.style.height.replace('px', ''));
+
+        if (focusX >= left && focusX <= left + width && focusY >= top && focusY <= top + height) {
+            bestIndex = index;
+            bestDistance = -1;
+            return;
+        }
+
+        if (bestDistance === -1) {
+            return;
+        }
+
+        const centerX = left + width / 2;
+        const centerY = top + height / 2;
+        const distance = Math.hypot(centerX - focusX, centerY - focusY);
+
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = index;
+        }
+    });
+
+    return bestIndex;
 }
 
 function isPrimaryPointer(event) {
