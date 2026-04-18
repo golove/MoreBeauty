@@ -1,217 +1,292 @@
+const GAP = 8;
+const MAX_CARD_WIDTH = 200;
+const MIN_CARD_WIDTH = 140;
+const MODAL_TOP_OFFSET = 72;
+
+const state = {
+    albums: [],
+    albumCards: [],
+    modalCards: [],
+    activeAlbum: null
+};
 
 async function init() {
-    let data = await loadData();
+    const app = document.getElementById('app');
     const modal = document.getElementById('modal');
-   
-    const app = document.getElementById('app');
+    const modalContent = document.getElementById('modal-content');
+    const modalClose = document.getElementById('modal-close');
 
-    const containerWidth = app.clientWidth;
-    // console.log(containerWidth)
-    // const cols = 4;
-    // const cardWidth = (containerWidth-gap*(cols+1)) / cols;
-    const gap = 6;
-    const cardWidth = 200;
-    const cols = Math.floor(containerWidth / (cardWidth + gap));
-    const mrLeft = (containerWidth - (cols * (cardWidth + gap) - gap)) / 2;
-
-    const dataArray = generateTwoDimensionalArray(data, cols, cardWidth, mrLeft, gap,(item)=>{return (cardWidth / item.srcs[0].aspect_ratio) + gap})
-
-    function cardNodeList(){
-        const cardNodeList = [];
-        dataArray.forEach(items => {
-        items.forEach(item => {
-           const card = createCard(item, cardWidth,true)
-           card.addEventListener('click',()=>{
-            const modalClose = document.createElement('div')
-            modalClose.setAttribute('id','modal-close') //
-            modalClose.style.position = 'absolute'
-            modalClose.style.top = '0'
-            modalClose.style.right = '0'
-            modalClose.style.zIndex = '10'
-             modalClose.innerText = 'Close'
-             modal.append(modalClose)
-            // modal.style.height = '100%'
-            modal.style.display = 'block'
-            const imgNodeList = []
-            imgArray = generateTwoDimensionalArray(item.srcs, cols, cardWidth, mrLeft, gap,(e)=>{return (cardWidth / e.aspect_ratio) + gap})
-            imgArray.forEach(imgs => {
-                imgs.forEach(arr => {
-                    const img = createCard(arr, cardWidth,false)
-                    imgNodeList.push(img)
-                })
-            
-            })
-           modal.append(...imgNodeList)
-           modalClose.addEventListener('click',()=>{
-            // modal.style.height = '0'
-            modal.style.display = 'none'
-            modal.innerHTML = ''
-           })
-           // 判断app有滚动操作
-           window.addEventListener('scroll',()=>{
-                modal.style.display = 'none'
-               modal.innerHTML = ''
-           })
-
-           window.addEventListener('resize',()=>{
-               debounce(appResize(imgNodeList),300)
-           })
-          
-        })
-           cardNodeList.push(card)
-         })
-
-        })
-        return cardNodeList
+    if (!app || !modal || !modalContent || !modalClose) {
+        return;
     }
-    const cards = cardNodeList();
-    app.append(...cards)
 
-    window.addEventListener('resize', ()=>{debounce(appResize(cards),300)})
+    bindGlobalEvents(app, modal, modalContent, modalClose);
+
+    try {
+        state.albums = await loadData();
+        renderAlbumGrid(app);
+    } catch (error) {
+        renderAppMessage(
+            app,
+            '图片数据加载失败',
+            window.location.protocol === 'file:'
+                ? '请使用本地 HTTP 服务启动当前目录，例如运行 python3 -m http.server 8000。'
+                : '请稍后重试，或检查 vipPicture.json 是否可访问。'
+        );
+        console.error(error);
+    }
 }
 
-function appResize(nodeList){
-    // const nodeList = document.querySelectorAll('.card');
-    const app = document.getElementById('app');
-    const containerWidth = app.clientWidth;
-    const gap = 6;
-    const cardWidth = 200;
-    const cols = Math.floor(containerWidth / (cardWidth + gap));
-    const mrLeft = (containerWidth - (cols * (cardWidth + gap) - gap)) / 2;
-    updateCardPosition(nodeList, cols, cardWidth, mrLeft, gap)
+function bindGlobalEvents(app, modal, modalContent, modalClose) {
+    const debouncedResize = debounce(() => {
+        layoutCards(app, state.albumCards, getAlbumHeight);
 
-}
-
-
-function updateCardPosition(cards, cols, cardWidth, mrLeft, gap) {
-    const newArray = new Array(cols).fill(0);
-    // const dataArray = new Array(cols).fill(null).map(() => []);
-    let minIndex = 0;
-    let minHeight = newArray[0];  // 初始最小高度
-
-    for (let i = 0; i < cards.length; i++) {
-            cards[i].style.top = newArray[minIndex] + 'px';
-            cards[i].style.left = (cardWidth * minIndex + gap * (minIndex + 1)) + mrLeft + 'px';
-        // 更新 newArray[minIndex] 的高度
-        // newArray[minIndex] += (cardWidth / array[i].srcs[0].aspect_ratio) + gap;
-        newArray[minIndex] += cards[i].offsetHeight + gap;
-        // 查找下一个最小高度和对应的索引
-        minHeight = newArray[minIndex];
-        for (let j = 0; j < cols; j++) {
-            if (newArray[j] < minHeight) {
-                minHeight = newArray[j];
-                minIndex = j;
-            }
+        if (state.activeAlbum) {
+            layoutCards(modalContent, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
         }
-    }
-}
+    }, 160);
 
-function generateTwoDimensionalArray(array, cols, cardWidth, mrLeft, gap, heightFunc) {
-    const newArray = new Array(cols).fill(gap);
-    const dataArray = new Array(cols).fill(null).map(() => []);
-    let minIndex = 0;
-    let minHeight = newArray[0];  // 初始最小高度
-
-    for (let i = 0; i < array.length; i++) {
-        // 插入当前项
-        dataArray[minIndex].push({
-            x: (cardWidth * minIndex + gap * (minIndex + 1)) + mrLeft,
-            y: newArray[minIndex],
-            ...array[i]
-        });
-
-        // 更新 newArray[minIndex] 的高度
-        // newArray[minIndex] += (cardWidth / array[i].srcs[0].aspect_ratio) + gap;
-        newArray[minIndex] += heightFunc(array[i]);
-        // 查找下一个最小高度和对应的索引
-        minHeight = newArray[minIndex];
-        for (let j = 0; j < cols; j++) {
-            if (newArray[j] < minHeight) {
-                minHeight = newArray[j];
-                minIndex = j;
-            }
+    window.addEventListener('resize', debouncedResize);
+    window.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            closeModal(modal, modalContent);
         }
-    }
-    return dataArray
+    });
+
+    modalClose.addEventListener('click', () => closeModal(modal, modalContent));
+    modal.addEventListener('click', event => {
+        if (event.target === modal) {
+            closeModal(modal, modalContent);
+        }
+    });
 }
 
+function renderAlbumGrid(app) {
+    clearContainer(app);
 
-function createCard(item, cardWidth,isTitle=false) {
-    const card = document.createElement('div');
-    card.setAttribute('class', 'card');
-    const img = document.createElement('img');
-    if(item.srcs){
-        card.setAttribute('style', `position:absolute;left: ${item.x}px;top: ${item.y}px;width: ${cardWidth}px;height: ${cardWidth / item.srcs[0].aspect_ratio}px`);
-        img.src = item.srcs[0].src;
-        img.setAttribute('style', `width: ${cardWidth}px; height: ${cardWidth / item.srcs[0].aspect_ratio}px;`);
-        
-    }else{
-        card.setAttribute('style', `position:absolute;left: ${item.x}px;top: ${item.y}px;width: ${cardWidth}px;height: ${cardWidth / item.aspect_ratio}px`);
-        img.src = item.src;
-        img.setAttribute('style', `width: ${cardWidth}px; height: ${cardWidth / item.aspect_ratio}px;`);
-        
+    if (!state.albums.length) {
+        renderAppMessage(app, '暂无图片数据', '可以检查 vipPicture.json 是否为空。');
+        return;
     }
-    
-   if (isTitle){ const title = document.createElement('h3');
-    title.textContent = item.title;
-    title.setAttribute('style', `position:absolute;font-size: ${cardWidth / 18}px;z-index:9;bottom:0;left:10px;color:white`);
 
-    const div = document.createElement('div');
-    div.setAttribute('style', `position:absolute;height:40px;left:0;right:0;bottom:-40px;overflow:hidden;background:#fff3;backdrop-filter:blur(10px);transition:all 0.3s ease `)
-    div.appendChild(title)  
-    card.appendChild(div);
-    card.addEventListener('mouseover', () => {
-        div.style.bottom = '0px';
-    })
-    card.addEventListener('mouseout', () => {
-        div.style.bottom = '-40px';
-    })
+    state.albumCards = state.albums.map(album => createAlbumCard(album));
+    app.append(...state.albumCards);
+    layoutCards(app, state.albumCards, getAlbumHeight);
 }
 
-    
-  
+function openAlbum(album) {
+    const modal = document.getElementById('modal');
+    const modalContent = document.getElementById('modal-content');
 
+    if (!modal || !modalContent) {
+        return;
+    }
+
+    state.activeAlbum = album;
+    clearContainer(modalContent);
+
+    const title = document.createElement('div');
+    title.className = 'modal-title';
+    title.textContent = album.title || 'Untitled Album';
+    modalContent.appendChild(title);
+
+    state.modalCards = (album.srcs || []).map(image => createImageCard(image));
+    modalContent.append(...state.modalCards);
+
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('modal-open');
+
+    layoutCards(modalContent, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
+}
+
+function closeModal(modal, modalContent) {
+    if (!state.activeAlbum) {
+        return;
+    }
+
+    state.activeAlbum = null;
+    state.modalCards = [];
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('modal-open');
+    clearContainer(modalContent);
+}
+
+function createAlbumCard(album) {
+    const card = buildCardShell();
+    card.classList.add('album-card');
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', album.title || 'Open album');
+    card.dataset.aspectRatio = String(getAspectRatio(getAlbumAspectRatio(album)));
+
+    const img = buildImageNode(getCoverSrc(album), album.title || 'Album cover');
+    const overlay = document.createElement('div');
+    overlay.className = 'card-overlay';
+
+    const title = document.createElement('h3');
+    title.className = 'card-title';
+    title.textContent = album.title || 'Untitled Album';
+
+    overlay.appendChild(title);
     card.appendChild(img);
-    return card 
+    card.appendChild(overlay);
+
+    const handleOpen = () => openAlbum(album);
+    card.addEventListener('click', handleOpen);
+    card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleOpen();
+        }
+    });
+
+    return card;
 }
 
-
-
-function loadData() {
-    return new Promise((resolve, reject) => {
-        fetch('vipPicture.json')
-            .then(response => response.json())
-            .then(data => {
-                console.log(data); // JSON 内容已解析为对象
-                resolve(data);
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                reject(error);
-            })
-    })
+function createImageCard(image) {
+    const card = buildCardShell();
+    card.classList.add('modal-card');
+    card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
+    card.appendChild(buildImageNode(image.src, 'Album image'));
+    return card;
 }
 
+function buildCardShell() {
+    const card = document.createElement('article');
+    card.className = 'card';
+    return card;
+}
 
+function buildImageNode(src, alt) {
+    const img = document.createElement('img');
+    img.src = src || '';
+    img.alt = alt;
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
+    return img;
+}
 
-window.addEventListener('DOMContentLoaded', init);
+function layoutCards(container, cards, heightGetter, topOffset = GAP) {
+    if (!cards.length) {
+        container.style.height = topOffset + 'px';
+        return;
+    }
 
+    const { cols, cardWidth, startX } = getLayoutMetrics(container.clientWidth);
+    const columnHeights = new Array(cols).fill(topOffset);
 
-//防抖
+    cards.forEach(card => {
+        const height = heightGetter(cardWidth, card);
+        const columnIndex = getShortestColumnIndex(columnHeights);
+
+        card.style.width = `${cardWidth}px`;
+        card.style.height = `${height}px`;
+        card.style.left = `${startX + columnIndex * (cardWidth + GAP)}px`;
+        card.style.top = `${columnHeights[columnIndex]}px`;
+
+        columnHeights[columnIndex] += height + GAP;
+    });
+
+    container.style.height = `${Math.max(...columnHeights)}px`;
+}
+
+function getLayoutMetrics(containerWidth) {
+    const availableWidth = Math.max(containerWidth, MIN_CARD_WIDTH + GAP * 2);
+    const cols = Math.max(1, Math.floor((availableWidth + GAP) / (MAX_CARD_WIDTH + GAP)));
+    const rawWidth = Math.floor((availableWidth - GAP * (cols - 1)) / cols);
+    const cardWidth = Math.max(Math.min(rawWidth, MAX_CARD_WIDTH), Math.min(MIN_CARD_WIDTH, availableWidth));
+    const contentWidth = cols * cardWidth + GAP * (cols - 1);
+    const startX = Math.max(0, Math.floor((availableWidth - contentWidth) / 2));
+
+    return { cols, cardWidth, startX };
+}
+
+function getShortestColumnIndex(columnHeights) {
+    let targetIndex = 0;
+
+    for (let index = 1; index < columnHeights.length; index += 1) {
+        if (columnHeights[index] < columnHeights[targetIndex]) {
+            targetIndex = index;
+        }
+    }
+
+    return targetIndex;
+}
+
+function getAlbumHeight(cardWidth, card) {
+    return getCardHeight(cardWidth, card.dataset.aspectRatio);
+}
+
+function getImageHeight(cardWidth, card) {
+    return getCardHeight(cardWidth, card.dataset.aspectRatio);
+}
+
+function getCardHeight(cardWidth, rawAspectRatio) {
+    return Math.max(120, Math.round(cardWidth / getAspectRatio(rawAspectRatio)));
+}
+
+function getAspectRatio(value) {
+    const aspectRatio = Number(value);
+    return aspectRatio > 0 ? aspectRatio : 1;
+}
+
+function getCoverSrc(album) {
+    return album.srcs && album.srcs[0] ? album.srcs[0].src : '';
+}
+
+function getAlbumAspectRatio(album) {
+    return album.srcs && album.srcs[0] ? album.srcs[0].aspect_ratio : 1;
+}
+
+function clearContainer(container) {
+    container.innerHTML = '';
+    container.style.height = '';
+}
+
+function renderAppMessage(container, title, description) {
+    clearContainer(container);
+
+    const box = document.createElement('section');
+    box.className = 'app-message';
+
+    const heading = document.createElement('h2');
+    heading.textContent = title;
+
+    const text = document.createElement('p');
+    text.textContent = description;
+
+    box.appendChild(heading);
+    box.appendChild(text);
+    container.appendChild(box);
+}
+
+async function loadData() {
+    const response = await fetch('vipPicture.json');
+
+    if (!response.ok) {
+        throw new Error(`Failed to load vipPicture.json: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    return data.map(album => ({
+        ...album,
+        srcs: Array.isArray(album.srcs) ? album.srcs : []
+    }));
+}
+
 function debounce(func, wait) {
-    let timeout;
-    return function () {
-        const context = this;
-        const args = arguments;
-        clearTimeout(timeout);
-        timeout = setTimeout(() => {
-            func.apply(context, args);
+    let timeoutId;
+
+    return function debounced(...args) {
+        clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => {
+            func.apply(this, args);
         }, wait);
     };
 }
 
-
-function scendFolder(img) {
-    document.createElement('div')
-
-}
+window.addEventListener('DOMContentLoaded', init);
