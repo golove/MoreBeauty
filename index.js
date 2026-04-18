@@ -2,105 +2,298 @@ const GAP = 8;
 const MAX_CARD_WIDTH = 200;
 const MIN_CARD_WIDTH = 140;
 const MODAL_TOP_OFFSET = 72;
+const SURFACE_PADDING = 80;
+const MIN_SCALE = 0.35;
+const MAX_SCALE = 3;
+const ZOOM_STEP = 1.2;
+const DRAG_THRESHOLD = 6;
 
 const state = {
     albums: [],
     albumCards: [],
     modalCards: [],
-    activeAlbum: null
+    activeAlbum: null,
+    surfaces: {
+        app: null,
+        modal: null
+    }
 };
 
 async function init() {
-    const app = document.getElementById('app');
     const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modal-content');
     const modalClose = document.getElementById('modal-close');
+    const appViewport = document.getElementById('app-viewport');
+    const appCanvas = document.getElementById('app-canvas');
+    const modalViewport = document.getElementById('modal-viewport');
+    const modalCanvas = document.getElementById('modal-canvas');
 
-    if (!app || !modal || !modalContent || !modalClose) {
+    if (!modal || !modalClose || !appViewport || !appCanvas || !modalViewport || !modalCanvas) {
         return;
     }
 
-    bindGlobalEvents(app, modal, modalContent, modalClose);
+    state.surfaces.app = createSurface('app', appViewport, appCanvas);
+    state.surfaces.modal = createSurface('modal', modalViewport, modalCanvas);
+
+    bindGlobalEvents(modal, modalClose);
 
     try {
         state.albums = await loadData();
-        renderAlbumGrid(app);
+        renderAlbumGrid();
     } catch (error) {
         renderAppMessage(
-            app,
+            state.surfaces.app.canvas,
             '图片数据加载失败',
             window.location.protocol === 'file:'
                 ? '请使用本地 HTTP 服务启动当前目录，例如运行 python3 -m http.server 8000。'
                 : '请稍后重试，或检查 vipPicture.json 是否可访问。'
         );
+        setEmptySurface(state.surfaces.app);
         console.error(error);
     }
 }
 
-function bindGlobalEvents(app, modal, modalContent, modalClose) {
+function createSurface(name, viewport, canvas) {
+    const zoomLabel = document.querySelector(`[data-zoom-label="${name}"]`);
+    const surface = {
+        name,
+        viewport,
+        canvas,
+        zoomLabel,
+        scale: 1,
+        x: 0,
+        y: 0,
+        contentWidth: 0,
+        contentHeight: 0,
+        pointerId: null,
+        startPointerX: 0,
+        startPointerY: 0,
+        startX: 0,
+        startY: 0,
+        activePointers: new Map(),
+        isPinching: false,
+        pinchStartDistance: 0,
+        pinchStartScale: 1,
+        pinchAnchorX: 0,
+        pinchAnchorY: 0,
+        isDragging: false,
+        clickSuppressed: false
+    };
+
+    bindSurfaceEvents(surface);
+    updateSurfaceTransform(surface);
+
+    return surface;
+}
+
+function bindGlobalEvents(modal, modalClose) {
     const debouncedResize = debounce(() => {
-        layoutCards(app, state.albumCards, getAlbumHeight);
+        renderAlbumGrid(false);
 
         if (state.activeAlbum) {
-            layoutCards(modalContent, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
+            renderModalGrid(state.activeAlbum, false);
         }
     }, 160);
 
     window.addEventListener('resize', debouncedResize);
     window.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
-            closeModal(modal, modalContent);
+            closeModal(modal);
         }
     });
 
-    modalClose.addEventListener('click', () => closeModal(modal, modalContent));
+    modalClose.addEventListener('click', () => closeModal(modal));
     modal.addEventListener('click', event => {
         if (event.target === modal) {
-            closeModal(modal, modalContent);
+            closeModal(modal);
         }
+    });
+
+    document.querySelectorAll('[data-action][data-target]').forEach(button => {
+        button.addEventListener('click', () => {
+            const surface = state.surfaces[button.dataset.target];
+
+            if (!surface) {
+                return;
+            }
+
+            if (button.dataset.action === 'zoom-in') {
+                zoomSurfaceByStep(surface, ZOOM_STEP);
+            } else if (button.dataset.action === 'zoom-out') {
+                zoomSurfaceByStep(surface, 1 / ZOOM_STEP);
+            } else if (button.dataset.action === 'fit') {
+                fitSurface(surface);
+            } else if (button.dataset.action === 'reset') {
+                resetSurface(surface);
+            }
+        });
     });
 }
 
-function renderAlbumGrid(app) {
-    clearContainer(app);
+function bindSurfaceEvents(surface) {
+    surface.viewport.addEventListener(
+        'click',
+        event => {
+            if (surface.clickSuppressed) {
+                event.preventDefault();
+                event.stopPropagation();
+                surface.clickSuppressed = false;
+            }
+        },
+        true
+    );
+
+    surface.viewport.addEventListener('pointerdown', event => {
+        if (!isPrimaryPointer(event)) {
+            return;
+        }
+
+        surface.activePointers.set(event.pointerId, {
+            id: event.pointerId,
+            x: event.clientX,
+            y: event.clientY
+        });
+
+        surface.viewport.setPointerCapture(event.pointerId);
+
+        if (surface.activePointers.size >= 2) {
+            beginSurfacePinch(surface);
+            return;
+        }
+
+        beginSurfaceDrag(surface, event.pointerId, event.clientX, event.clientY);
+    });
+
+    surface.viewport.addEventListener('pointermove', event => {
+        if (!surface.activePointers.has(event.pointerId)) {
+            return;
+        }
+
+        surface.activePointers.set(event.pointerId, {
+            id: event.pointerId,
+            x: event.clientX,
+            y: event.clientY
+        });
+
+        if (surface.activePointers.size >= 2) {
+            if (!surface.isPinching) {
+                beginSurfacePinch(surface);
+            }
+
+            updateSurfacePinch(surface);
+            return;
+        }
+
+        if (surface.pointerId !== event.pointerId) {
+            return;
+        }
+
+        const deltaX = event.clientX - surface.startPointerX;
+        const deltaY = event.clientY - surface.startPointerY;
+
+        if (!surface.isDragging && Math.hypot(deltaX, deltaY) >= DRAG_THRESHOLD) {
+            surface.isDragging = true;
+            surface.clickSuppressed = true;
+        }
+
+        if (!surface.isDragging) {
+            return;
+        }
+
+        surface.x = surface.startX + deltaX;
+        surface.y = surface.startY + deltaY;
+        clampSurfacePosition(surface);
+        updateSurfaceTransform(surface);
+    });
+
+    surface.viewport.addEventListener('pointerup', event => {
+        releaseSurfacePointer(surface, event.pointerId);
+    });
+
+    surface.viewport.addEventListener('pointercancel', event => {
+        releaseSurfacePointer(surface, event.pointerId);
+    });
+
+    surface.viewport.addEventListener('wheel', event => {
+        event.preventDefault();
+
+        if (event.ctrlKey || event.metaKey) {
+            const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+            zoomSurface(surface, surface.scale * factor, event.clientX, event.clientY);
+            return;
+        }
+
+        surface.x -= event.deltaX;
+        surface.y -= event.deltaY;
+        clampSurfacePosition(surface);
+        updateSurfaceTransform(surface);
+    }, { passive: false });
+
+    surface.viewport.addEventListener('dblclick', event => {
+        const nextScale = surface.scale < 1.4 ? 1.8 : 1;
+        zoomSurface(surface, nextScale, event.clientX, event.clientY);
+    });
+}
+
+function renderAlbumGrid(shouldReset = true) {
+    const surface = state.surfaces.app;
+
+    clearCanvas(surface.canvas);
 
     if (!state.albums.length) {
-        renderAppMessage(app, '暂无图片数据', '可以检查 vipPicture.json 是否为空。');
+        renderAppMessage(surface.canvas, '暂无图片数据', '可以检查 vipPicture.json 是否为空。');
+        setEmptySurface(surface);
         return;
     }
 
     state.albumCards = state.albums.map(album => createAlbumCard(album));
-    app.append(...state.albumCards);
-    layoutCards(app, state.albumCards, getAlbumHeight);
+    surface.canvas.append(...state.albumCards);
+    layoutCards(surface, state.albumCards, getAlbumHeight);
+
+    if (shouldReset) {
+        resetSurface(surface);
+    } else {
+        clampSurfacePosition(surface);
+        updateSurfaceTransform(surface);
+    }
 }
 
-function openAlbum(album) {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modal-content');
+function renderModalGrid(album, shouldReset = true) {
+    const surface = state.surfaces.modal;
 
-    if (!modal || !modalContent) {
-        return;
-    }
-
-    state.activeAlbum = album;
-    clearContainer(modalContent);
+    clearCanvas(surface.canvas);
 
     const title = document.createElement('div');
     title.className = 'modal-title';
     title.textContent = album.title || 'Untitled Album';
-    modalContent.appendChild(title);
+    surface.canvas.appendChild(title);
 
     state.modalCards = (album.srcs || []).map(image => createImageCard(image));
-    modalContent.append(...state.modalCards);
+    surface.canvas.append(...state.modalCards);
+    layoutCards(surface, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
 
+    if (shouldReset) {
+        resetSurface(surface);
+    } else {
+        clampSurfacePosition(surface);
+        updateSurfaceTransform(surface);
+    }
+}
+
+function openAlbum(album) {
+    const modal = document.getElementById('modal');
+
+    if (!modal) {
+        return;
+    }
+
+    state.activeAlbum = album;
+    renderModalGrid(album);
     modal.classList.add('is-open');
     modal.setAttribute('aria-hidden', 'false');
     document.body.classList.add('modal-open');
-
-    layoutCards(modalContent, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
 }
 
-function closeModal(modal, modalContent) {
+function closeModal(modal) {
     if (!state.activeAlbum) {
         return;
     }
@@ -110,7 +303,8 @@ function closeModal(modal, modalContent) {
     modal.classList.remove('is-open');
     modal.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('modal-open');
-    clearContainer(modalContent);
+    clearCanvas(state.surfaces.modal.canvas);
+    setEmptySurface(state.surfaces.modal);
 }
 
 function createAlbumCard(album) {
@@ -147,7 +341,6 @@ function createAlbumCard(album) {
 
 function createImageCard(image) {
     const card = buildCardShell();
-    card.classList.add('modal-card');
     card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
     card.appendChild(buildImageNode(image.src, 'Album image'));
     return card;
@@ -169,13 +362,16 @@ function buildImageNode(src, alt) {
     return img;
 }
 
-function layoutCards(container, cards, heightGetter, topOffset = GAP) {
+function layoutCards(surface, cards, heightGetter, topOffset = GAP) {
     if (!cards.length) {
-        container.style.height = topOffset + 'px';
+        surface.contentWidth = surface.viewport.clientWidth;
+        surface.contentHeight = Math.max(topOffset, surface.viewport.clientHeight);
+        surface.canvas.style.width = `${surface.contentWidth}px`;
+        surface.canvas.style.height = `${surface.contentHeight}px`;
         return;
     }
 
-    const { cols, cardWidth, startX } = getLayoutMetrics(container.clientWidth);
+    const { cols, cardWidth, startX, contentWidth } = getLayoutMetrics(surface.viewport.clientWidth);
     const columnHeights = new Array(cols).fill(topOffset);
 
     cards.forEach(card => {
@@ -190,18 +386,21 @@ function layoutCards(container, cards, heightGetter, topOffset = GAP) {
         columnHeights[columnIndex] += height + GAP;
     });
 
-    container.style.height = `${Math.max(...columnHeights)}px`;
+    surface.contentWidth = Math.max(contentWidth, surface.viewport.clientWidth);
+    surface.contentHeight = Math.max(Math.max(...columnHeights), surface.viewport.clientHeight);
+    surface.canvas.style.width = `${surface.contentWidth}px`;
+    surface.canvas.style.height = `${surface.contentHeight}px`;
 }
 
 function getLayoutMetrics(containerWidth) {
-    const availableWidth = Math.max(containerWidth, MIN_CARD_WIDTH + GAP * 2);
+    const availableWidth = Math.max(containerWidth - SURFACE_PADDING * 2, MIN_CARD_WIDTH + GAP * 2);
     const cols = Math.max(1, Math.floor((availableWidth + GAP) / (MAX_CARD_WIDTH + GAP)));
     const rawWidth = Math.floor((availableWidth - GAP * (cols - 1)) / cols);
     const cardWidth = Math.max(Math.min(rawWidth, MAX_CARD_WIDTH), Math.min(MIN_CARD_WIDTH, availableWidth));
     const contentWidth = cols * cardWidth + GAP * (cols - 1);
-    const startX = Math.max(0, Math.floor((availableWidth - contentWidth) / 2));
+    const startX = Math.max(SURFACE_PADDING, Math.floor((containerWidth - contentWidth) / 2));
 
-    return { cols, cardWidth, startX };
+    return { cols, cardWidth, startX, contentWidth: startX * 2 + contentWidth };
 }
 
 function getShortestColumnIndex(columnHeights) {
@@ -241,14 +440,23 @@ function getAlbumAspectRatio(album) {
     return album.srcs && album.srcs[0] ? album.srcs[0].aspect_ratio : 1;
 }
 
-function clearContainer(container) {
-    container.innerHTML = '';
-    container.style.height = '';
+function clearCanvas(canvas) {
+    canvas.innerHTML = '';
+    canvas.classList.remove('is-empty');
+    canvas.style.width = '';
+    canvas.style.height = '';
 }
 
-function renderAppMessage(container, title, description) {
-    clearContainer(container);
+function setEmptySurface(surface) {
+    surface.contentWidth = surface.viewport.clientWidth;
+    surface.contentHeight = surface.viewport.clientHeight;
+    surface.canvas.style.width = `${surface.contentWidth}px`;
+    surface.canvas.style.height = `${surface.contentHeight}px`;
+    surface.canvas.classList.add('is-empty');
+    resetSurface(surface);
+}
 
+function renderAppMessage(canvas, title, description) {
     const box = document.createElement('section');
     box.className = 'app-message';
 
@@ -260,7 +468,7 @@ function renderAppMessage(container, title, description) {
 
     box.appendChild(heading);
     box.appendChild(text);
-    container.appendChild(box);
+    canvas.appendChild(box);
 }
 
 async function loadData() {
@@ -276,6 +484,203 @@ async function loadData() {
         ...album,
         srcs: Array.isArray(album.srcs) ? album.srcs : []
     }));
+}
+
+function resetSurface(surface) {
+    surface.scale = 1;
+
+    const viewportWidth = surface.viewport.clientWidth;
+    const viewportHeight = surface.viewport.clientHeight;
+    const scaledWidth = surface.contentWidth * surface.scale;
+    const scaledHeight = surface.contentHeight * surface.scale;
+
+    surface.x = scaledWidth < viewportWidth
+        ? Math.round((viewportWidth - scaledWidth) / 2)
+        : SURFACE_PADDING * 0.5;
+    surface.y = scaledHeight < viewportHeight
+        ? Math.round((viewportHeight - scaledHeight) / 2)
+        : SURFACE_PADDING * 0.5;
+
+    clampSurfacePosition(surface);
+    updateSurfaceTransform(surface);
+}
+
+function fitSurface(surface) {
+    const viewportWidth = surface.viewport.clientWidth;
+    const viewportHeight = surface.viewport.clientHeight;
+    const availableWidth = Math.max(1, viewportWidth - SURFACE_PADDING * 2);
+    const availableHeight = Math.max(1, viewportHeight - SURFACE_PADDING * 2);
+    const scaleByWidth = availableWidth / Math.max(surface.contentWidth, 1);
+    const scaleByHeight = availableHeight / Math.max(surface.contentHeight, 1);
+
+    surface.scale = clamp(Math.min(scaleByWidth, scaleByHeight, 1), MIN_SCALE, MAX_SCALE);
+    surface.x = Math.round((viewportWidth - surface.contentWidth * surface.scale) / 2);
+    surface.y = Math.round((viewportHeight - surface.contentHeight * surface.scale) / 2);
+
+    clampSurfacePosition(surface);
+    updateSurfaceTransform(surface);
+}
+
+function zoomSurfaceByStep(surface, factor) {
+    const rect = surface.viewport.getBoundingClientRect();
+    zoomSurface(surface, surface.scale * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+function zoomSurface(surface, nextScale, clientX, clientY) {
+    const boundedScale = clamp(nextScale, MIN_SCALE, MAX_SCALE);
+    const rect = surface.viewport.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+    const contentX = (localX - surface.x) / surface.scale;
+    const contentY = (localY - surface.y) / surface.scale;
+
+    surface.scale = boundedScale;
+    surface.x = localX - contentX * boundedScale;
+    surface.y = localY - contentY * boundedScale;
+
+    clampSurfacePosition(surface);
+    updateSurfaceTransform(surface);
+}
+
+function clampSurfacePosition(surface) {
+    const viewportWidth = surface.viewport.clientWidth;
+    const viewportHeight = surface.viewport.clientHeight;
+    const scaledWidth = surface.contentWidth * surface.scale;
+    const scaledHeight = surface.contentHeight * surface.scale;
+
+    if (scaledWidth <= viewportWidth - SURFACE_PADDING) {
+        surface.x = Math.round((viewportWidth - scaledWidth) / 2);
+    } else {
+        const minX = viewportWidth - scaledWidth - SURFACE_PADDING;
+        const maxX = SURFACE_PADDING;
+        surface.x = clamp(surface.x, minX, maxX);
+    }
+
+    if (scaledHeight <= viewportHeight - SURFACE_PADDING) {
+        surface.y = Math.round((viewportHeight - scaledHeight) / 2);
+    } else {
+        const minY = viewportHeight - scaledHeight - SURFACE_PADDING;
+        const maxY = SURFACE_PADDING;
+        surface.y = clamp(surface.y, minY, maxY);
+    }
+}
+
+function updateSurfaceTransform(surface) {
+    surface.canvas.style.transform = `translate(${surface.x}px, ${surface.y}px) scale(${surface.scale})`;
+
+    if (surface.zoomLabel) {
+        surface.zoomLabel.textContent = `${Math.round(surface.scale * 100)}%`;
+    }
+}
+
+function beginSurfaceDrag(surface, pointerId, clientX, clientY) {
+    surface.pointerId = pointerId;
+    surface.startPointerX = clientX;
+    surface.startPointerY = clientY;
+    surface.startX = surface.x;
+    surface.startY = surface.y;
+    surface.isDragging = false;
+    surface.isPinching = false;
+    surface.viewport.classList.add('is-dragging');
+}
+
+function beginSurfacePinch(surface) {
+    const pointers = getTrackedPointers(surface);
+
+    if (pointers.length < 2) {
+        return;
+    }
+
+    const rect = surface.viewport.getBoundingClientRect();
+    const midpoint = getPointerMidpoint(pointers[0], pointers[1]);
+    const localX = midpoint.x - rect.left;
+    const localY = midpoint.y - rect.top;
+
+    surface.pointerId = null;
+    surface.isDragging = false;
+    surface.isPinching = true;
+    surface.clickSuppressed = true;
+    surface.viewport.classList.add('is-dragging');
+    surface.pinchStartDistance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
+    surface.pinchStartScale = surface.scale;
+    surface.pinchAnchorX = (localX - surface.x) / surface.scale;
+    surface.pinchAnchorY = (localY - surface.y) / surface.scale;
+}
+
+function updateSurfacePinch(surface) {
+    const pointers = getTrackedPointers(surface);
+
+    if (pointers.length < 2) {
+        return;
+    }
+
+    const rect = surface.viewport.getBoundingClientRect();
+    const midpoint = getPointerMidpoint(pointers[0], pointers[1]);
+    const localX = midpoint.x - rect.left;
+    const localY = midpoint.y - rect.top;
+    const distance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
+    const nextScale = clamp(
+        surface.pinchStartScale * (distance / surface.pinchStartDistance),
+        MIN_SCALE,
+        MAX_SCALE
+    );
+
+    surface.scale = nextScale;
+    surface.x = localX - surface.pinchAnchorX * nextScale;
+    surface.y = localY - surface.pinchAnchorY * nextScale;
+
+    clampSurfacePosition(surface);
+    updateSurfaceTransform(surface);
+}
+
+function getTrackedPointers(surface) {
+    return Array.from(surface.activePointers.values()).slice(0, 2);
+}
+
+function getPointerDistance(firstPointer, secondPointer) {
+    return Math.hypot(secondPointer.x - firstPointer.x, secondPointer.y - firstPointer.y);
+}
+
+function getPointerMidpoint(firstPointer, secondPointer) {
+    return {
+        x: (firstPointer.x + secondPointer.x) / 2,
+        y: (firstPointer.y + secondPointer.y) / 2
+    };
+}
+
+function releaseSurfacePointer(surface, pointerId) {
+    if (surface.viewport.hasPointerCapture(pointerId)) {
+        surface.viewport.releasePointerCapture(pointerId);
+    }
+
+    surface.activePointers.delete(pointerId);
+
+    if (surface.activePointers.size >= 2) {
+        beginSurfacePinch(surface);
+        return;
+    }
+
+    if (surface.activePointers.size === 1) {
+        const [remainingPointer] = getTrackedPointers(surface);
+        beginSurfaceDrag(surface, remainingPointer.id, remainingPointer.x, remainingPointer.y);
+        return;
+    }
+
+    surface.viewport.classList.remove('is-dragging');
+    surface.pointerId = null;
+    surface.isDragging = false;
+    surface.isPinching = false;
+    window.setTimeout(() => {
+        surface.clickSuppressed = false;
+    }, 0);
+}
+
+function isPrimaryPointer(event) {
+    return event.button === 0 || event.pointerType === 'touch';
+}
+
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
 }
 
 function debounce(func, wait) {
