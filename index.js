@@ -397,7 +397,7 @@ function renderModalGrid(album, shouldReset = true) {
     title.textContent = album.title || 'Untitled Album';
     surface.canvas.appendChild(title);
 
-    state.modalCards = (album.srcs || []).map(image => createImageCard(image));
+    state.modalCards = (album.srcs || []).map((image, index) => createImageCard(image, index));
     surface.canvas.append(...state.modalCards);
     layoutCards(surface, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
 
@@ -475,11 +475,28 @@ function createAlbumCard(album) {
     return card;
 }
 
-function createImageCard(image) {
+function createImageCard(image, index) {
     const card = buildCardShell();
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Open slide ${index + 1}`);
+    card.dataset.slideIndex = String(index);
     card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
     card.style.setProperty('--card-accent', getAccentColor(image.src || 'image'));
     card.appendChild(buildImageNode(image.src, 'Album image'));
+
+    const handleOpenSlide = () => {
+        enterSlideshowAtIndex(state.surfaces.modal, index);
+    };
+
+    card.addEventListener('click', handleOpenSlide);
+    card.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            handleOpenSlide();
+        }
+    });
+
     return card;
 }
 
@@ -939,9 +956,18 @@ function shouldEnterSlideshow(surface, scale) {
 function enterSlideshowMode(surface, focusContentX, focusContentY) {
     const activeIndex = getClosestCardIndex(state.modalCards, focusContentX, focusContentY);
 
+    enterSlideshowAtIndex(surface, activeIndex);
+}
+
+function enterSlideshowAtIndex(surface, activeIndex) {
+    if (!surface || !state.modalCards.length) {
+        return;
+    }
+
     surface.isSlideshow = true;
     surface.isSlideshowSettled = false;
-    layoutSlideshow(surface, state.modalCards, activeIndex);
+    surface.slideshowIndex = clamp(activeIndex, 0, Math.max(state.modalCards.length - 1, 0));
+    layoutSlideshow(surface, state.modalCards, surface.slideshowIndex);
     scheduleSlideshowSettle(surface);
 }
 
