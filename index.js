@@ -6,7 +6,10 @@ const SURFACE_PADDING = 80;
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 3;
 const ZOOM_STEP = 1.2;
+const WHEEL_ZOOM_SENSITIVITY = 0.0018;
+const VIEW_ANIMATION_DURATION = 220;
 const DRAG_THRESHOLD = 6;
+const APP_TIP_STORAGE_KEY = 'morebeauty.appTipHidden';
 
 const state = {
     albums: [],
@@ -26,6 +29,8 @@ async function init() {
     const appCanvas = document.getElementById('app-canvas');
     const modalViewport = document.getElementById('modal-viewport');
     const modalCanvas = document.getElementById('modal-canvas');
+    const appTip = document.getElementById('app-tip');
+    const appTipClose = document.getElementById('app-tip-close');
 
     if (!modal || !modalClose || !appViewport || !appCanvas || !modalViewport || !modalCanvas) {
         return;
@@ -34,7 +39,7 @@ async function init() {
     state.surfaces.app = createSurface('app', appViewport, appCanvas);
     state.surfaces.modal = createSurface('modal', modalViewport, modalCanvas);
 
-    bindGlobalEvents(modal, modalClose);
+    bindGlobalEvents(modal, modalClose, appTip, appTipClose);
 
     try {
         state.albums = await loadData();
@@ -77,7 +82,8 @@ function createSurface(name, viewport, canvas) {
         pinchAnchorY: 0,
         isDragging: false,
         clickSuppressed: false,
-        renderFrame: 0
+        renderFrame: 0,
+        viewAnimationFrame: 0
     };
 
     bindSurfaceEvents(surface);
@@ -86,7 +92,7 @@ function createSurface(name, viewport, canvas) {
     return surface;
 }
 
-function bindGlobalEvents(modal, modalClose) {
+function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
     const debouncedResize = debounce(() => {
         relayoutSurface(state.surfaces.app, state.albumCards, getAlbumHeight);
 
@@ -109,6 +115,17 @@ function bindGlobalEvents(modal, modalClose) {
         }
     });
 
+    if (appTip && getStoredBoolean(APP_TIP_STORAGE_KEY)) {
+        appTip.classList.add('is-hidden');
+    }
+
+    if (appTip && appTipClose) {
+        appTipClose.addEventListener('click', () => {
+            appTip.classList.add('is-hidden');
+            setStoredBoolean(APP_TIP_STORAGE_KEY, true);
+        });
+    }
+
     document.querySelectorAll('[data-action][data-target]').forEach(button => {
         button.addEventListener('click', () => {
             const surface = state.surfaces[button.dataset.target];
@@ -118,13 +135,13 @@ function bindGlobalEvents(modal, modalClose) {
             }
 
             if (button.dataset.action === 'zoom-in') {
-                zoomSurfaceByStep(surface, ZOOM_STEP);
+                zoomSurfaceByStep(surface, ZOOM_STEP, true);
             } else if (button.dataset.action === 'zoom-out') {
-                zoomSurfaceByStep(surface, 1 / ZOOM_STEP);
+                zoomSurfaceByStep(surface, 1 / ZOOM_STEP, true);
             } else if (button.dataset.action === 'fit') {
-                fitSurface(surface);
+                fitSurface(surface, true);
             } else if (button.dataset.action === 'reset') {
-                resetSurface(surface);
+                resetSurface(surface, true);
             }
         });
     });
@@ -226,9 +243,10 @@ function bindSurfaceEvents(surface) {
 
     surface.viewport.addEventListener('wheel', event => {
         event.preventDefault();
+        stopSurfaceAnimation(surface);
 
         if (event.ctrlKey || event.metaKey) {
-            const factor = event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+            const factor = Math.exp(-getNormalizedWheelDelta(event) * WHEEL_ZOOM_SENSITIVITY);
             zoomSurface(surface, surface.scale * factor, event.clientX, event.clientY);
             return;
         }
@@ -241,7 +259,7 @@ function bindSurfaceEvents(surface) {
 
     surface.viewport.addEventListener('dblclick', event => {
         const nextScale = surface.scale < 1.4 ? 1.8 : 1;
-        zoomSurface(surface, nextScale, event.clientX, event.clientY);
+        zoomSurface(surface, nextScale, event.clientX, event.clientY, true);
     });
 }
 
@@ -499,26 +517,23 @@ async function loadData() {
     }));
 }
 
-function resetSurface(surface) {
-    surface.scale = 1;
-
+function resetSurface(surface, animate = false) {
     const viewportWidth = surface.viewport.clientWidth;
     const viewportHeight = surface.viewport.clientHeight;
-    const scaledWidth = surface.contentWidth * surface.scale;
-    const scaledHeight = surface.contentHeight * surface.scale;
-
-    surface.x = scaledWidth < viewportWidth
+    const scale = 1;
+    const scaledWidth = surface.contentWidth * scale;
+    const scaledHeight = surface.contentHeight * scale;
+    const x = scaledWidth < viewportWidth
         ? Math.round((viewportWidth - scaledWidth) / 2)
         : SURFACE_PADDING * 0.5;
-    surface.y = scaledHeight < viewportHeight
+    const y = scaledHeight < viewportHeight
         ? Math.round((viewportHeight - scaledHeight) / 2)
         : SURFACE_PADDING * 0.5;
 
-    clampSurfacePosition(surface);
-    updateSurfaceTransform(surface);
+    setSurfaceView(surface, scale, x, y, animate);
 }
 
-function fitSurface(surface) {
+function fitSurface(surface, animate = false) {
     const viewportWidth = surface.viewport.clientWidth;
     const viewportHeight = surface.viewport.clientHeight;
     const availableWidth = Math.max(1, viewportWidth - SURFACE_PADDING * 2);
@@ -526,33 +541,86 @@ function fitSurface(surface) {
     const scaleByWidth = availableWidth / Math.max(surface.contentWidth, 1);
     const scaleByHeight = availableHeight / Math.max(surface.contentHeight, 1);
 
-    surface.scale = clamp(Math.min(scaleByWidth, scaleByHeight, 1), MIN_SCALE, MAX_SCALE);
-    surface.x = Math.round((viewportWidth - surface.contentWidth * surface.scale) / 2);
-    surface.y = Math.round((viewportHeight - surface.contentHeight * surface.scale) / 2);
+    const scale = clamp(Math.min(scaleByWidth, scaleByHeight, 1), MIN_SCALE, MAX_SCALE);
+    const x = Math.round((viewportWidth - surface.contentWidth * scale) / 2);
+    const y = Math.round((viewportHeight - surface.contentHeight * scale) / 2);
 
-    clampSurfacePosition(surface);
-    updateSurfaceTransform(surface);
+    setSurfaceView(surface, scale, x, y, animate);
 }
 
-function zoomSurfaceByStep(surface, factor) {
+function zoomSurfaceByStep(surface, factor, animate = false) {
     const rect = surface.viewport.getBoundingClientRect();
-    zoomSurface(surface, surface.scale * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+    zoomSurface(
+        surface,
+        surface.scale * factor,
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2,
+        animate
+    );
 }
 
-function zoomSurface(surface, nextScale, clientX, clientY) {
+function zoomSurface(surface, nextScale, clientX, clientY, animate = false) {
     const boundedScale = clamp(nextScale, MIN_SCALE, MAX_SCALE);
     const rect = surface.viewport.getBoundingClientRect();
     const localX = clientX - rect.left;
     const localY = clientY - rect.top;
     const contentX = (localX - surface.x) / surface.scale;
     const contentY = (localY - surface.y) / surface.scale;
+    const x = localX - contentX * boundedScale;
+    const y = localY - contentY * boundedScale;
 
-    surface.scale = boundedScale;
-    surface.x = localX - contentX * boundedScale;
-    surface.y = localY - contentY * boundedScale;
+    setSurfaceView(surface, boundedScale, x, y, animate);
+}
 
+function setSurfaceView(surface, scale, x, y, animate = false) {
+    if (animate) {
+        animateSurfaceView(surface, scale, x, y);
+        return;
+    }
+
+    stopSurfaceAnimation(surface);
+    surface.scale = scale;
+    surface.x = x;
+    surface.y = y;
     clampSurfacePosition(surface);
     updateSurfaceTransform(surface);
+}
+
+function animateSurfaceView(surface, targetScale, targetX, targetY) {
+    stopSurfaceAnimation(surface);
+
+    const startScale = surface.scale;
+    const startX = surface.x;
+    const startY = surface.y;
+    const startedAt = performance.now();
+
+    surface.viewAnimationFrame = window.requestAnimationFrame(function animateFrame(now) {
+        const progress = clamp((now - startedAt) / VIEW_ANIMATION_DURATION, 0, 1);
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+
+        surface.scale = startScale + (targetScale - startScale) * easedProgress;
+        surface.x = startX + (targetX - startX) * easedProgress;
+        surface.y = startY + (targetY - startY) * easedProgress;
+
+        clampSurfacePosition(surface);
+        updateSurfaceTransform(surface);
+
+        if (progress < 1) {
+            surface.viewAnimationFrame = window.requestAnimationFrame(animateFrame);
+            return;
+        }
+
+        surface.viewAnimationFrame = 0;
+    });
+}
+
+function stopSurfaceAnimation(surface) {
+    if (!surface.viewAnimationFrame) {
+        return;
+    }
+
+    window.cancelAnimationFrame(surface.viewAnimationFrame);
+    surface.viewAnimationFrame = 0;
 }
 
 function clampSurfacePosition(surface) {
@@ -594,6 +662,7 @@ function updateSurfaceTransform(surface) {
 }
 
 function beginSurfaceDrag(surface, pointerId, clientX, clientY) {
+    stopSurfaceAnimation(surface);
     surface.pointerId = pointerId;
     surface.startPointerX = clientX;
     surface.startPointerY = clientY;
@@ -611,6 +680,7 @@ function beginSurfacePinch(surface) {
         return;
     }
 
+    stopSurfaceAnimation(surface);
     const rect = surface.viewport.getBoundingClientRect();
     const midpoint = getPointerMidpoint(pointers[0], pointers[1]);
     const localX = midpoint.x - rect.left;
@@ -711,6 +781,18 @@ function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
 }
 
+function getNormalizedWheelDelta(event) {
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+        return event.deltaY * 16;
+    }
+
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+        return event.deltaY * window.innerHeight;
+    }
+
+    return event.deltaY;
+}
+
 function getAccentColor(seed) {
     const hue = hashString(seed) % 360;
     return `hsl(${hue} 94% 64%)`;
@@ -724,6 +806,22 @@ function hashString(value) {
     }
 
     return hash;
+}
+
+function getStoredBoolean(key) {
+    try {
+        return window.localStorage.getItem(key) === 'true';
+    } catch (error) {
+        return false;
+    }
+}
+
+function setStoredBoolean(key, value) {
+    try {
+        window.localStorage.setItem(key, String(value));
+    } catch (error) {
+        return;
+    }
 }
 
 function debounce(func, wait) {
