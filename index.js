@@ -10,9 +10,14 @@ const WHEEL_ZOOM_SENSITIVITY = 0.0026;
 const VIEW_ANIMATION_DURATION = 160;
 const SLIDESHOW_SETTLE_DURATION = 220;
 const DRAG_THRESHOLD = 6;
-const PINCH_ZOOM_EXPONENT = 1.75;
+const GRID_PINCH_ZOOM_EXPONENT = 1.9;
+const VIEWER_PINCH_ZOOM_EXPONENT = 2.5;
+const VIEWER_MAX_SCALE = 4.5;
 const SLIDESHOW_TRIGGER_SCALE = MAX_SCALE * 0.985;
 const SLIDESHOW_EXIT_SCALE = 2.2;
+const VIEWER_DOUBLE_TAP_SCALE = 2.6;
+const VIEWER_NAVIGATION_THRESHOLD = 64;
+const VIEWER_FRAME_MARGIN = 36;
 const APP_TIP_STORAGE_KEY = 'morebeauty.appTipHidden';
 
 const state = {
@@ -93,7 +98,16 @@ function createSurface(name, viewport, canvas) {
         isSlideshow: false,
         isSlideshowSettled: false,
         slideshowIndex: 0,
-        slideshowSettleTimer: 0
+        slideshowSettleTimer: 0,
+        viewerMedia: null,
+        viewerBaseX: 0,
+        viewerBaseY: 0,
+        viewerBaseWidth: 0,
+        viewerBaseHeight: 0,
+        viewerFrameX: 0,
+        viewerFrameY: 0,
+        viewerFrameWidth: 0,
+        viewerFrameHeight: 0
     };
 
     bindSurfaceEvents(surface);
@@ -107,7 +121,11 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
         relayoutSurface(state.surfaces.app, state.albumCards, getAlbumHeight);
 
         if (state.activeAlbum) {
-            relayoutSurface(state.surfaces.modal, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
+            if (state.surfaces.modal.isSlideshow) {
+                layoutViewer(state.surfaces.modal, getActiveModalImage());
+            } else {
+                relayoutSurface(state.surfaces.modal, state.modalCards, getImageHeight, MODAL_TOP_OFFSET);
+            }
         }
     }, 160);
 
@@ -156,25 +174,26 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
             }
 
             if (button.dataset.action === 'zoom-in') {
-                if (surface.isSlideshow) {
-                    return;
-                }
                 zoomSurfaceByStep(surface, ZOOM_STEP, true);
             } else if (button.dataset.action === 'zoom-out') {
                 if (surface.isSlideshow) {
-                    exitSlideshowMode(surface, true);
+                    if (surface.scale > 1.02) {
+                        zoomSurfaceByStep(surface, 1 / ZOOM_STEP, true);
+                    } else {
+                        exitSlideshowMode(surface, true);
+                    }
                     return;
                 }
                 zoomSurfaceByStep(surface, 1 / ZOOM_STEP, true);
             } else if (button.dataset.action === 'fit') {
                 if (surface.isSlideshow) {
-                    exitSlideshowMode(surface, true);
+                    resetViewer(surface, true);
                     return;
                 }
                 fitSurface(surface, true);
             } else if (button.dataset.action === 'reset') {
                 if (surface.isSlideshow) {
-                    exitSlideshowMode(surface, true);
+                    resetViewer(surface, true);
                     return;
                 }
                 resetSurface(surface, true);
@@ -193,7 +212,7 @@ function relayoutSurface(surface, cards, heightGetter, topOffset = GAP) {
     }
 
     if (surface.isSlideshow && surface.name === 'modal') {
-        layoutSlideshow(surface, cards, surface.slideshowIndex);
+        layoutViewer(surface, getActiveModalImage());
         return;
     }
 
@@ -247,18 +266,11 @@ function bindSurfaceEvents(surface) {
 
         if (surface.isSlideshow) {
             if (surface.activePointers.size >= 2) {
-                const pointers = getTrackedPointers(surface);
-
                 if (!surface.isPinching) {
                     beginSurfacePinch(surface);
                 }
 
-                const distance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
-
-                if (distance / surface.pinchStartDistance < 0.88) {
-                    exitSlideshowMode(surface, true);
-                }
-
+                updateSurfacePinch(surface);
                 return;
             }
 
@@ -269,10 +281,33 @@ function bindSurfaceEvents(surface) {
             const deltaX = event.clientX - surface.startPointerX;
             const deltaY = event.clientY - surface.startPointerY;
 
-            if (Math.abs(deltaX) > 56 && Math.abs(deltaX) > Math.abs(deltaY)) {
+            if (!surface.isDragging && Math.hypot(deltaX, deltaY) >= DRAG_THRESHOLD) {
+                surface.isDragging = true;
+                surface.clickSuppressed = true;
+                ensurePointerCapture(surface, event.pointerId);
+                surface.viewport.classList.add('is-dragging');
+            }
+
+            if (!surface.isDragging) {
+                return;
+            }
+
+            if (surface.scale > 1.02) {
+                surface.x = surface.startX + deltaX;
+                surface.y = surface.startY + deltaY;
+                clampSurfacePosition(surface);
+                updateSurfaceTransform(surface);
+                return;
+            }
+
+            if (Math.abs(deltaX) > VIEWER_NAVIGATION_THRESHOLD && Math.abs(deltaX) > Math.abs(deltaY)) {
                 navigateSlideshow(surface, deltaX < 0 ? 1 : -1, true);
                 surface.startPointerX = event.clientX;
                 surface.startPointerY = event.clientY;
+                surface.startX = surface.x;
+                surface.startY = surface.y;
+                surface.isDragging = false;
+                surface.viewport.classList.remove('is-dragging');
                 surface.clickSuppressed = true;
             }
 
@@ -326,16 +361,23 @@ function bindSurfaceEvents(surface) {
 
         if (surface.isSlideshow) {
             if (event.ctrlKey || event.metaKey) {
-                if (getNormalizedWheelDelta(event) > 0) {
-                    exitSlideshowMode(surface, true);
-                }
+                const factor = Math.exp(-getNormalizedWheelDelta(event) * WHEEL_ZOOM_SENSITIVITY);
+                zoomSurface(surface, surface.scale * factor, event.clientX, event.clientY);
                 return;
             }
 
-            const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+            if (surface.scale > 1.02) {
+                surface.x -= event.deltaX;
+                surface.y -= event.deltaY;
+                clampSurfacePosition(surface);
+                updateSurfaceTransform(surface);
+                return;
+            }
 
-            if (Math.abs(horizontalDelta) > 8) {
-                navigateSlideshow(surface, horizontalDelta > 0 ? 1 : -1, true);
+            const navigationDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+
+            if (Math.abs(navigationDelta) > 8) {
+                navigateSlideshow(surface, navigationDelta > 0 ? 1 : -1, true);
             }
 
             return;
@@ -354,6 +396,12 @@ function bindSurfaceEvents(surface) {
     }, { passive: false });
 
     surface.viewport.addEventListener('dblclick', event => {
+        if (surface.isSlideshow) {
+            const nextScale = surface.scale < 1.2 ? VIEWER_DOUBLE_TAP_SCALE : 1;
+            zoomSurface(surface, nextScale, event.clientX, event.clientY, true);
+            return;
+        }
+
         const nextScale = surface.scale < 1.4 ? 1.8 : 1;
         zoomSurface(surface, nextScale, event.clientX, event.clientY, true);
     });
@@ -387,15 +435,13 @@ function renderModalGrid(album, shouldReset = true) {
     const modal = document.getElementById('modal');
 
     clearCanvas(surface.canvas);
+    surface.viewerMedia = null;
+    clearSlideshowSettle(surface);
     surface.isSlideshow = false;
     surface.isSlideshowSettled = false;
     surface.slideshowIndex = 0;
+    setModalTitle(album.title || 'Untitled Album');
     syncSlideshowState(surface, modal);
-
-    const title = document.createElement('div');
-    title.className = 'modal-title';
-    title.textContent = album.title || 'Untitled Album';
-    surface.canvas.appendChild(title);
 
     state.modalCards = (album.srcs || []).map((image, index) => createImageCard(image, index));
     surface.canvas.append(...state.modalCards);
@@ -435,9 +481,12 @@ function closeModal(modal) {
     modal.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('modal-open');
     clearCanvas(state.surfaces.modal.canvas);
+    clearSlideshowSettle(state.surfaces.modal);
+    state.surfaces.modal.viewerMedia = null;
     state.surfaces.modal.isSlideshow = false;
     state.surfaces.modal.isSlideshowSettled = false;
     state.surfaces.modal.slideshowIndex = 0;
+    setModalTitle('');
     syncSlideshowState(state.surfaces.modal, modal);
     setEmptySurface(state.surfaces.modal);
 }
@@ -479,7 +528,7 @@ function createImageCard(image, index) {
     const card = buildCardShell();
     card.setAttribute('role', 'button');
     card.setAttribute('tabindex', '0');
-    card.setAttribute('aria-label', `Open slide ${index + 1}`);
+    card.setAttribute('aria-label', `Open image ${index + 1}`);
     card.dataset.slideIndex = String(index);
     card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
     card.style.setProperty('--card-accent', getAccentColor(image.src || 'image'));
@@ -546,42 +595,6 @@ function layoutCards(surface, cards, heightGetter, topOffset = GAP) {
     surface.canvas.style.height = `${surface.contentHeight}px`;
 }
 
-function layoutSlideshow(surface, cards, activeIndex = 0) {
-    const viewportWidth = surface.viewport.clientWidth;
-    const viewportHeight = surface.viewport.clientHeight;
-    const safeTop = MODAL_TOP_OFFSET + 28;
-    const slideWidth = viewportWidth;
-    const slideHeight = viewportHeight;
-    const frameWidth = Math.max(240, viewportWidth - SURFACE_PADDING * 2);
-    const frameHeight = Math.max(180, viewportHeight - safeTop - SURFACE_PADDING);
-
-    cards.forEach((card, index) => {
-        const aspectRatio = getAspectRatio(card.dataset.aspectRatio);
-        const widthByHeight = frameHeight * aspectRatio;
-        const heightByWidth = frameWidth / aspectRatio;
-        const width = Math.min(frameWidth, widthByHeight);
-        const height = Math.min(frameHeight, heightByWidth);
-        const slideX = index * slideWidth;
-        const left = slideX + Math.round((slideWidth - width) / 2);
-        const top = safeTop + Math.max(0, Math.round((frameHeight - height) / 2));
-
-        card.style.width = `${width}px`;
-        card.style.height = `${height}px`;
-        card.style.left = `${left}px`;
-        card.style.top = `${top}px`;
-    });
-
-    surface.contentWidth = cards.length * slideWidth;
-    surface.contentHeight = slideHeight;
-    surface.canvas.style.width = `${surface.contentWidth}px`;
-    surface.canvas.style.height = `${surface.contentHeight}px`;
-    surface.scale = 1;
-    surface.y = 0;
-    surface.slideshowIndex = clamp(activeIndex, 0, Math.max(cards.length - 1, 0));
-    syncSlideshowState(surface, document.getElementById('modal'));
-    setSurfaceView(surface, 1, -surface.slideshowIndex * slideWidth, 0, true);
-}
-
 function getLayoutMetrics(containerWidth) {
     const availableWidth = Math.max(containerWidth - SURFACE_PADDING * 2, MIN_CARD_WIDTH + GAP * 2);
     const cols = Math.max(1, Math.floor((availableWidth + GAP) / (MAX_CARD_WIDTH + GAP)));
@@ -638,6 +651,7 @@ function clearCanvas(canvas) {
 }
 
 function setEmptySurface(surface) {
+    surface.viewerMedia = null;
     surface.contentWidth = surface.viewport.clientWidth;
     surface.contentHeight = surface.viewport.clientHeight;
     surface.canvas.style.width = `${surface.contentWidth}px`;
@@ -719,10 +733,21 @@ function zoomSurfaceByStep(surface, factor, animate = false) {
 }
 
 function zoomSurface(surface, nextScale, clientX, clientY, animate = false) {
-    const boundedScale = clamp(nextScale, MIN_SCALE, MAX_SCALE);
+    const boundedScale = clamp(nextScale, getMinScale(surface), getMaxScale(surface));
     const rect = surface.viewport.getBoundingClientRect();
     const localX = clientX - rect.left;
     const localY = clientY - rect.top;
+
+    if (surface.isSlideshow && surface.viewerMedia) {
+        const contentX = (localX - surface.viewerBaseX - surface.x) / surface.scale;
+        const contentY = (localY - surface.viewerBaseY - surface.y) / surface.scale;
+        const x = localX - surface.viewerBaseX - contentX * boundedScale;
+        const y = localY - surface.viewerBaseY - contentY * boundedScale;
+
+        setSurfaceView(surface, boundedScale, x, y, animate);
+        return;
+    }
+
     const contentX = (localX - surface.x) / surface.scale;
     const contentY = (localY - surface.y) / surface.scale;
 
@@ -789,16 +814,15 @@ function stopSurfaceAnimation(surface) {
 }
 
 function clampSurfacePosition(surface) {
+    if (surface.isSlideshow && surface.viewerMedia) {
+        clampViewerPosition(surface);
+        return;
+    }
+
     const viewportWidth = surface.viewport.clientWidth;
     const viewportHeight = surface.viewport.clientHeight;
     const scaledWidth = surface.contentWidth * surface.scale;
     const scaledHeight = surface.contentHeight * surface.scale;
-
-    if (surface.isSlideshow) {
-        surface.x = clamp(surface.x, viewportWidth - scaledWidth, 0);
-        surface.y = 0;
-        return;
-    }
 
     if (scaledWidth <= viewportWidth - SURFACE_PADDING) {
         surface.x = Math.round((viewportWidth - scaledWidth) / 2);
@@ -824,7 +848,13 @@ function updateSurfaceTransform(surface) {
 
     surface.renderFrame = window.requestAnimationFrame(() => {
         surface.renderFrame = 0;
-        surface.canvas.style.transform = `translate3d(${surface.x}px, ${surface.y}px, 0) scale(${surface.scale})`;
+
+        if (surface.isSlideshow && surface.viewerMedia) {
+            surface.canvas.style.transform = 'translate3d(0px, 0px, 0) scale(1)';
+            surface.viewerMedia.style.transform = `translate3d(${surface.x}px, ${surface.y}px, 0) scale(${surface.scale})`;
+        } else {
+            surface.canvas.style.transform = `translate3d(${surface.x}px, ${surface.y}px, 0) scale(${surface.scale})`;
+        }
 
         if (surface.zoomLabel) {
             surface.zoomLabel.textContent = `${Math.round(surface.scale * 100)}%`;
@@ -866,6 +896,13 @@ function beginSurfacePinch(surface) {
     ensurePointerCapture(surface, pointers[1].id);
     surface.pinchStartDistance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
     surface.pinchStartScale = surface.scale;
+
+    if (surface.isSlideshow && surface.viewerMedia) {
+        surface.pinchAnchorX = (localX - surface.viewerBaseX - surface.x) / surface.scale;
+        surface.pinchAnchorY = (localY - surface.viewerBaseY - surface.y) / surface.scale;
+        return;
+    }
+
     surface.pinchAnchorX = (localX - surface.x) / surface.scale;
     surface.pinchAnchorY = (localY - surface.y) / surface.scale;
 }
@@ -883,19 +920,25 @@ function updateSurfacePinch(surface) {
     const localY = midpoint.y - rect.top;
     const distance = Math.max(getPointerDistance(pointers[0], pointers[1]), 1);
     const nextScale = clamp(
-        surface.pinchStartScale * Math.pow(distance / surface.pinchStartDistance, PINCH_ZOOM_EXPONENT),
-        MIN_SCALE,
-        MAX_SCALE
+        surface.pinchStartScale * Math.pow(distance / surface.pinchStartDistance, getPinchZoomExponent(surface)),
+        getMinScale(surface),
+        getMaxScale(surface)
     );
 
-    if (shouldEnterSlideshow(surface, nextScale)) {
+    if (!surface.isSlideshow && shouldEnterSlideshow(surface, nextScale)) {
         enterSlideshowMode(surface, surface.pinchAnchorX, surface.pinchAnchorY);
         return;
     }
 
     surface.scale = nextScale;
-    surface.x = localX - surface.pinchAnchorX * nextScale;
-    surface.y = localY - surface.pinchAnchorY * nextScale;
+
+    if (surface.isSlideshow && surface.viewerMedia) {
+        surface.x = localX - surface.viewerBaseX - surface.pinchAnchorX * nextScale;
+        surface.y = localY - surface.viewerBaseY - surface.pinchAnchorY * nextScale;
+    } else {
+        surface.x = localX - surface.pinchAnchorX * nextScale;
+        surface.y = localY - surface.pinchAnchorY * nextScale;
+    }
 
     clampSurfacePosition(surface);
     updateSurfaceTransform(surface);
@@ -949,6 +992,18 @@ function releaseSurfacePointer(surface, pointerId) {
     }, 0);
 }
 
+function getPinchZoomExponent(surface) {
+    return surface.isSlideshow ? VIEWER_PINCH_ZOOM_EXPONENT : GRID_PINCH_ZOOM_EXPONENT;
+}
+
+function getMinScale(surface) {
+    return surface.isSlideshow ? 1 : MIN_SCALE;
+}
+
+function getMaxScale(surface) {
+    return surface.isSlideshow ? VIEWER_MAX_SCALE : MAX_SCALE;
+}
+
 function shouldEnterSlideshow(surface, scale) {
     return surface.name === 'modal' && !surface.isSlideshow && state.modalCards.length > 0 && scale >= SLIDESHOW_TRIGGER_SCALE;
 }
@@ -967,7 +1022,7 @@ function enterSlideshowAtIndex(surface, activeIndex) {
     surface.isSlideshow = true;
     surface.isSlideshowSettled = false;
     surface.slideshowIndex = clamp(activeIndex, 0, Math.max(state.modalCards.length - 1, 0));
-    layoutSlideshow(surface, state.modalCards, surface.slideshowIndex);
+    renderViewer(surface, surface.slideshowIndex, true);
     scheduleSlideshowSettle(surface);
 }
 
@@ -980,6 +1035,7 @@ function exitSlideshowMode(surface, animate = false) {
     }
 
     clearSlideshowSettle(surface);
+    surface.viewerMedia = null;
     renderModalGrid(album, false);
     surface.slideshowIndex = activeIndex;
 
@@ -1021,8 +1077,165 @@ function navigateSlideshow(surface, direction, animate = false) {
     }
 
     surface.slideshowIndex = nextIndex;
+    renderViewer(surface, nextIndex, animate);
+    scheduleSlideshowSettle(surface);
+}
+
+function renderViewer(surface, index, animateReset = false) {
+    const image = getModalImage(index);
+
+    if (!surface || !image) {
+        return;
+    }
+
+    if (!surface.viewerMedia) {
+        surface.viewerMedia = createViewerMedia();
+    }
+
+    updateViewerMedia(surface.viewerMedia, image, index);
+    clearCanvas(surface.canvas);
+    surface.canvas.appendChild(surface.viewerMedia);
+    layoutViewer(surface, image, animateReset);
+    preloadAdjacentImages(state.activeAlbum, index);
     syncSlideshowState(surface, document.getElementById('modal'));
-    setSurfaceView(surface, 1, -nextIndex * surface.viewport.clientWidth, 0, animate);
+}
+
+function createViewerMedia() {
+    const card = buildCardShell();
+    card.classList.add('viewer-media');
+    card.appendChild(buildImageNode('', 'Album image'));
+    return card;
+}
+
+function updateViewerMedia(card, image, index) {
+    const img = card.querySelector('img');
+
+    if (!img) {
+        return;
+    }
+
+    img.src = image.src || '';
+    img.alt = `Album image ${index + 1}`;
+    img.loading = 'eager';
+    card.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
+    card.style.setProperty('--card-accent', getAccentColor(image.src || `image-${index}`));
+}
+
+function layoutViewer(surface, image, animateReset = false) {
+    if (!surface.viewerMedia || !image) {
+        return;
+    }
+
+    const viewportWidth = surface.viewport.clientWidth;
+    const viewportHeight = surface.viewport.clientHeight;
+    const frameX = VIEWER_FRAME_MARGIN;
+    const frameY = MODAL_TOP_OFFSET + 32;
+    const frameWidth = Math.max(220, viewportWidth - VIEWER_FRAME_MARGIN * 2);
+    const frameHeight = Math.max(160, viewportHeight - frameY - VIEWER_FRAME_MARGIN);
+    const aspectRatio = getAspectRatio(image.aspect_ratio);
+    const widthByHeight = frameHeight * aspectRatio;
+    const heightByWidth = frameWidth / aspectRatio;
+    const width = Math.min(frameWidth, widthByHeight);
+    const height = Math.min(frameHeight, heightByWidth);
+    const left = Math.round(frameX + (frameWidth - width) / 2);
+    const top = Math.round(frameY + (frameHeight - height) / 2);
+
+    surface.viewerBaseX = left;
+    surface.viewerBaseY = top;
+    surface.viewerBaseWidth = width;
+    surface.viewerBaseHeight = height;
+    surface.viewerFrameX = frameX;
+    surface.viewerFrameY = frameY;
+    surface.viewerFrameWidth = frameWidth;
+    surface.viewerFrameHeight = frameHeight;
+    surface.contentWidth = viewportWidth;
+    surface.contentHeight = viewportHeight;
+
+    surface.canvas.style.width = `${viewportWidth}px`;
+    surface.canvas.style.height = `${viewportHeight}px`;
+    surface.viewerMedia.style.left = `${left}px`;
+    surface.viewerMedia.style.top = `${top}px`;
+    surface.viewerMedia.style.width = `${width}px`;
+    surface.viewerMedia.style.height = `${height}px`;
+
+    if (animateReset) {
+        resetViewer(surface, true);
+        return;
+    }
+
+    resetViewer(surface);
+}
+
+function resetViewer(surface, animate = false) {
+    setSurfaceView(surface, 1, 0, 0, animate);
+}
+
+function clampViewerPosition(surface) {
+    const scaledWidth = surface.viewerBaseWidth * surface.scale;
+    const scaledHeight = surface.viewerBaseHeight * surface.scale;
+    const frameLeft = surface.viewerFrameX;
+    const frameTop = surface.viewerFrameY;
+    const frameWidth = surface.viewerFrameWidth;
+    const frameHeight = surface.viewerFrameHeight;
+
+    let nextLeft = surface.viewerBaseX + surface.x;
+    let nextTop = surface.viewerBaseY + surface.y;
+
+    if (scaledWidth <= frameWidth) {
+        nextLeft = frameLeft + (frameWidth - scaledWidth) / 2;
+    } else {
+        nextLeft = clamp(nextLeft, frameLeft + frameWidth - scaledWidth, frameLeft);
+    }
+
+    if (scaledHeight <= frameHeight) {
+        nextTop = frameTop + (frameHeight - scaledHeight) / 2;
+    } else {
+        nextTop = clamp(nextTop, frameTop + frameHeight - scaledHeight, frameTop);
+    }
+
+    surface.x = Math.round(nextLeft - surface.viewerBaseX);
+    surface.y = Math.round(nextTop - surface.viewerBaseY);
+}
+
+function getModalImage(index) {
+    if (!state.activeAlbum || !Array.isArray(state.activeAlbum.srcs)) {
+        return null;
+    }
+
+    return state.activeAlbum.srcs[index] || null;
+}
+
+function getActiveModalImage() {
+    return getModalImage(state.surfaces.modal.slideshowIndex);
+}
+
+function preloadAdjacentImages(album, index) {
+    if (!album || !Array.isArray(album.srcs)) {
+        return;
+    }
+
+    [-1, 1].forEach(offset => {
+        const image = album.srcs[index + offset];
+
+        if (!image || !image.src) {
+            return;
+        }
+
+        const preload = new Image();
+        preload.decoding = 'async';
+        preload.referrerPolicy = 'no-referrer';
+        preload.src = image.src;
+    });
+}
+
+function setModalTitle(title) {
+    const modalTitle = document.getElementById('modal-title');
+
+    if (!modalTitle) {
+        return;
+    }
+
+    modalTitle.textContent = title;
 }
 
 function syncSlideshowState(surface, modal) {
