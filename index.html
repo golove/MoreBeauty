@@ -104,6 +104,10 @@
             gap: 8px;
         }
 
+        .toolbar-controls.is-modal {
+            margin-left: auto;
+        }
+
         .toolbar-controls .zoom-label {
             min-width: 52px;
             text-align: center;
@@ -136,6 +140,13 @@
         .tool-button.is-strong {
             background: rgba(34, 29, 24, 0.92);
             color: #fff;
+        }
+
+        .tool-button.is-icon {
+            min-width: 44px;
+            padding-inline: 0;
+            font-size: 22px;
+            line-height: 1;
         }
 
         .tool-button.is-quiet {
@@ -218,6 +229,18 @@
             opacity: 1;
             transform: translateY(0);
             pointer-events: auto;
+        }
+
+        .modal-close-button {
+            display: none;
+        }
+
+        .modal-layer.is-slideshow .modal-close-button {
+            display: inline-flex;
+        }
+
+        .modal-layer.is-slideshow .modal-back-button {
+            display: none;
         }
 
         .modal-layer.is-slideshow .surface-viewport {
@@ -372,6 +395,13 @@
             filter: none;
         }
 
+        .viewer-root.is-shifting .viewer-slot {
+            transition:
+                transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 0.16s ease,
+                filter 0.16s ease;
+        }
+
         .viewer-slot.is-hidden,
         .viewer-slot.is-entry-hidden {
             opacity: 0;
@@ -451,19 +481,14 @@
 
     <div id="modal" class="modal-layer" aria-hidden="true">
         <div class="surface-toolbar">
-            <div class="toolbar-card">
-                <div class="toolbar-title">
-                    <strong>Album View</strong>
-                    <span>滚动浏览图片，点击进入单图查看</span>
-                </div>
-            </div>
-            <div class="toolbar-card toolbar-controls" data-surface-controls="modal">
+            <div class="toolbar-card toolbar-controls is-modal" data-surface-controls="modal">
                 <div class="slideshow-controls">
                     <button class="tool-button" type="button" data-action="prev-slide" data-target="modal">Prev</button>
                     <span id="modal-slide-counter" class="slideshow-counter">1 / 1</span>
                     <button class="tool-button" type="button" data-action="next-slide" data-target="modal">Next</button>
                 </div>
-                <button id="modal-close" class="tool-button is-strong" type="button" aria-label="Close gallery">Close</button>
+                <button id="modal-back" class="tool-button is-icon modal-back-button" type="button" aria-label="Back to gallery">‹</button>
+                <button id="modal-close" class="tool-button is-strong modal-close-button" type="button" aria-label="Close gallery">Close</button>
             </div>
         </div>
         <div id="modal-title" class="modal-title"></div>

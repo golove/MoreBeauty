@@ -36,6 +36,7 @@ const state = {
 async function init() {
     const modal = document.getElementById('modal');
     const modalClose = document.getElementById('modal-close');
+    const modalBack = document.getElementById('modal-back');
     const appViewport = document.getElementById('app-viewport');
     const appCanvas = document.getElementById('app-canvas');
     const modalViewport = document.getElementById('modal-viewport');
@@ -43,14 +44,14 @@ async function init() {
     const appTip = document.getElementById('app-tip');
     const appTipClose = document.getElementById('app-tip-close');
 
-    if (!modal || !modalClose || !appViewport || !appCanvas || !modalViewport || !modalCanvas) {
+    if (!modal || !modalClose || !modalBack || !appViewport || !appCanvas || !modalViewport || !modalCanvas) {
         return;
     }
 
     state.surfaces.app = createSurface('app', appViewport, appCanvas);
     state.surfaces.modal = createSurface('modal', modalViewport, modalCanvas);
 
-    bindGlobalEvents(modal, modalClose, appTip, appTipClose);
+    bindGlobalEvents(modal, modalClose, modalBack, appTip, appTipClose);
 
     try {
         state.albums = await loadData();
@@ -124,7 +125,7 @@ function createSurface(name, viewport, canvas) {
     return surface;
 }
 
-function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
+function bindGlobalEvents(modal, modalClose, modalBack, appTip, appTipClose) {
     const debouncedResize = debounce(() => {
         relayoutSurface(state.surfaces.app, state.albumCards, getAlbumHeight);
 
@@ -157,6 +158,7 @@ function bindGlobalEvents(modal, modalClose, appTip, appTipClose) {
     });
 
     modalClose.addEventListener('click', () => closeModal(modal));
+    modalBack.addEventListener('click', () => closeModal(modal));
     modal.addEventListener('click', event => {
         if (event.target === modal) {
             closeModal(modal);
@@ -1133,36 +1135,40 @@ function updateViewerSlots(surface, index) {
         const relativeOffset = Number(slot.dataset.viewerOffset || 0);
         const imageIndex = index + relativeOffset;
         const image = getModalImage(imageIndex);
-        const img = slot.querySelector('img');
+        applyViewerSlotContent(slot, image, imageIndex, relativeOffset);
 
-        slot.classList.toggle('is-current', relativeOffset === 0);
-        slot.classList.toggle('is-adjacent', relativeOffset !== 0);
-        slot.classList.toggle('is-hidden', !image);
-        slot.dataset.viewerIndex = image ? String(imageIndex) : '';
-
-        if (!img) {
-            return;
-        }
-
-        if (!image) {
-            img.removeAttribute('src');
-            img.alt = '';
-            return;
-        }
-
-        if (img.src !== image.src) {
-            img.src = image.src || '';
-        }
-
-        img.alt = `Album image ${imageIndex + 1}`;
-        img.loading = relativeOffset === 0 ? 'eager' : 'lazy';
-        slot.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
-        slot.style.setProperty('--card-accent', getAccentColor(image.src || `image-${imageIndex}`));
-
-        if (relativeOffset === 0) {
+        if (relativeOffset === 0 && image) {
             surface.viewerCurrentSlot = slot;
         }
     });
+}
+
+function applyViewerSlotContent(slot, image, imageIndex, relativeOffset) {
+    const img = slot.querySelector('img');
+
+    slot.classList.toggle('is-current', relativeOffset === 0);
+    slot.classList.toggle('is-adjacent', relativeOffset !== 0);
+    slot.classList.toggle('is-hidden', !image);
+    slot.dataset.viewerIndex = image ? String(imageIndex) : '';
+
+    if (!img) {
+        return;
+    }
+
+    if (!image) {
+        img.removeAttribute('src');
+        img.alt = '';
+        return;
+    }
+
+    if (img.src !== image.src) {
+        img.src = image.src || '';
+    }
+
+    img.alt = `Album image ${imageIndex + 1}`;
+    img.loading = relativeOffset === 0 ? 'eager' : 'lazy';
+    slot.dataset.aspectRatio = String(getAspectRatio(image.aspect_ratio));
+    slot.style.setProperty('--card-accent', getAccentColor(image.src || `image-${imageIndex}`));
 }
 
 function layoutViewer(surface, options = {}) {
@@ -1331,14 +1337,63 @@ function animateViewerNavigation(surface, direction) {
     const targetOffset = -direction * surface.viewport.clientWidth;
 
     animateViewerOffset(surface, targetOffset, () => {
-        surface.slideshowIndex = nextIndex;
-        surface.scale = 1;
-        surface.x = 0;
-        surface.y = 0;
-        surface.viewerNavOffset = 0;
-        renderViewer(surface, nextIndex);
+        completeViewerNavigation(surface, direction, nextIndex);
         scheduleSlideshowSettle(surface);
     });
+}
+
+function completeViewerNavigation(surface, direction, nextIndex) {
+    shiftViewerSlots(surface, direction, nextIndex);
+    surface.viewerRoot.classList.add('is-shifting');
+    surface.slideshowIndex = nextIndex;
+    surface.scale = 1;
+    surface.x = 0;
+    surface.y = 0;
+    surface.viewerNavOffset = 0;
+    layoutViewer(surface);
+    preloadAdjacentImages(state.activeAlbum, nextIndex);
+    syncSlideshowState(surface, document.getElementById('modal'));
+    updateSurfaceTransform(surface);
+
+    window.requestAnimationFrame(() => {
+        if (surface.viewerRoot) {
+            surface.viewerRoot.classList.remove('is-shifting');
+        }
+    });
+}
+
+function shiftViewerSlots(surface, direction, nextIndex) {
+    const previousSlot = getViewerSlotByOffset(surface, -1);
+    const currentSlot = getViewerSlotByOffset(surface, 0);
+    const nextSlot = getViewerSlotByOffset(surface, 1);
+
+    if (!previousSlot || !currentSlot || !nextSlot) {
+        updateViewerSlots(surface, nextIndex);
+        return;
+    }
+
+    if (direction > 0) {
+        previousSlot.dataset.viewerOffset = '1';
+        currentSlot.dataset.viewerOffset = '-1';
+        nextSlot.dataset.viewerOffset = '0';
+        applyViewerSlotContent(previousSlot, getModalImage(nextIndex + 1), nextIndex + 1, 1);
+        applyViewerSlotContent(currentSlot, getModalImage(nextIndex - 1), nextIndex - 1, -1);
+        applyViewerSlotContent(nextSlot, getModalImage(nextIndex), nextIndex, 0);
+        surface.viewerCurrentSlot = nextSlot;
+        return;
+    }
+
+    nextSlot.dataset.viewerOffset = '-1';
+    currentSlot.dataset.viewerOffset = '1';
+    previousSlot.dataset.viewerOffset = '0';
+    applyViewerSlotContent(nextSlot, getModalImage(nextIndex - 1), nextIndex - 1, -1);
+    applyViewerSlotContent(currentSlot, getModalImage(nextIndex + 1), nextIndex + 1, 1);
+    applyViewerSlotContent(previousSlot, getModalImage(nextIndex), nextIndex, 0);
+    surface.viewerCurrentSlot = previousSlot;
+}
+
+function getViewerSlotByOffset(surface, offset) {
+    return surface.viewerSlots.find(slot => Number(slot.dataset.viewerOffset || 0) === offset) || null;
 }
 
 function animateViewerOffset(surface, targetOffset, onComplete = null) {
