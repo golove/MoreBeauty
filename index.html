@@ -154,9 +154,11 @@
         .surface-viewport {
             position: absolute;
             inset: 0;
-            overflow: hidden;
-            touch-action: none;
-            cursor: grab;
+            overflow-x: hidden;
+            overflow-y: auto;
+            touch-action: pan-y pinch-zoom;
+            cursor: default;
+            overscroll-behavior: contain;
             background:
                 linear-gradient(90deg, rgba(255, 255, 255, 0.22) 1px, transparent 1px),
                 linear-gradient(rgba(255, 255, 255, 0.2) 1px, transparent 1px);
@@ -164,7 +166,13 @@
             background-position: center;
         }
 
-        .surface-viewport.is-dragging {
+        .modal-layer.is-slideshow .surface-viewport {
+            overflow: hidden;
+            touch-action: none;
+            cursor: grab;
+        }
+
+        .modal-layer.is-slideshow .surface-viewport.is-dragging {
             cursor: grabbing;
         }
 
@@ -196,11 +204,6 @@
             display: block;
         }
 
-        .modal-layer.is-slideshow .surface-viewport {
-            background: linear-gradient(180deg, rgba(18, 16, 12, 0.9), rgba(34, 29, 24, 0.92));
-            transition: background 0.28s ease;
-        }
-
         .slideshow-controls {
             display: flex;
             align-items: center;
@@ -215,6 +218,11 @@
             opacity: 1;
             transform: translateY(0);
             pointer-events: auto;
+        }
+
+        .modal-layer.is-slideshow .surface-viewport {
+            background: linear-gradient(180deg, rgba(18, 16, 12, 0.9), rgba(34, 29, 24, 0.92));
+            transition: background 0.28s ease;
         }
 
         .slideshow-counter {
@@ -333,14 +341,44 @@
             background: transparent;
         }
 
-        .viewer-media {
+        .viewer-root {
+            position: absolute;
+            inset: 0;
+        }
+
+        .viewer-slot {
             background: rgba(255, 255, 255, 0.04);
             box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
             transform-origin: 0 0;
             will-change: transform;
+            transition:
+                left 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                top 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                height 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 0.22s ease,
+                filter 0.22s ease;
         }
 
-        .viewer-media img {
+        .viewer-slot.is-adjacent {
+            opacity: 0.34;
+            filter: saturate(0.88) brightness(0.9);
+        }
+
+        .viewer-slot.is-current {
+            z-index: 2;
+            opacity: 1;
+            filter: none;
+        }
+
+        .viewer-slot.is-hidden,
+        .viewer-slot.is-entry-hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .viewer-slot img {
             object-fit: contain;
             background: transparent;
         }
@@ -401,16 +439,9 @@
             <div id="app-tip" class="toolbar-card">
                 <div class="toolbar-title">
                     <strong>Beauty Gallery</strong>
-                    <span>拖动画布移动，双指捏合或按住 Ctrl/Cmd 加滚轮缩放</span>
+                    <span>滚动浏览图集，点击卡片进入图集</span>
                 </div>
                 <button id="app-tip-close" class="tool-button is-quiet" type="button" aria-label="Close tips">✕</button>
-            </div>
-            <div class="toolbar-card toolbar-controls" data-surface-controls="app">
-                <button class="tool-button" type="button" data-action="zoom-out" data-target="app">-</button>
-                <span class="zoom-label" data-zoom-label="app">100%</span>
-                <button class="tool-button" type="button" data-action="zoom-in" data-target="app">+</button>
-                <button class="tool-button" type="button" data-action="fit" data-target="app">Fit</button>
-                <button class="tool-button" type="button" data-action="reset" data-target="app">Reset</button>
             </div>
         </div>
         <div id="app-viewport" class="surface-viewport" aria-label="Gallery canvas">
@@ -423,15 +454,10 @@
             <div class="toolbar-card">
                 <div class="toolbar-title">
                     <strong>Album View</strong>
-                    <span>这里也支持双指缩放和整图适配</span>
+                    <span>滚动浏览图片，点击进入单图查看</span>
                 </div>
             </div>
             <div class="toolbar-card toolbar-controls" data-surface-controls="modal">
-                <button class="tool-button" type="button" data-action="zoom-out" data-target="modal">-</button>
-                <span class="zoom-label" data-zoom-label="modal">100%</span>
-                <button class="tool-button" type="button" data-action="zoom-in" data-target="modal">+</button>
-                <button class="tool-button" type="button" data-action="fit" data-target="modal">Fit</button>
-                <button class="tool-button" type="button" data-action="reset" data-target="modal">Reset</button>
                 <div class="slideshow-controls">
                     <button class="tool-button" type="button" data-action="prev-slide" data-target="modal">Prev</button>
                     <span id="modal-slide-counter" class="slideshow-counter">1 / 1</span>
