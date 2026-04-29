@@ -1355,7 +1355,6 @@ function animateViewerNavigation(surface, direction) {
 
 function completeViewerNavigation(surface, direction, nextIndex) {
     shiftViewerSlots(surface, direction, nextIndex);
-    surface.viewerRoot.classList.add('is-shifting');
     surface.slideshowIndex = nextIndex;
     surface.scale = 1;
     surface.x = 0;
@@ -1363,14 +1362,11 @@ function completeViewerNavigation(surface, direction, nextIndex) {
     surface.viewerNavOffset = 0;
     layoutViewer(surface);
     preloadAdjacentImages(state.activeAlbum, nextIndex);
+    const activeImage = getModalImage(nextIndex);
+    updateSlideshowBackdrop(activeImage ? activeImage.src || '' : '');
+    updateModalThumbnailSelection(nextIndex);
     syncSlideshowState(surface, document.getElementById('modal'));
     updateSurfaceTransform(surface);
-
-    window.requestAnimationFrame(() => {
-        if (surface.viewerRoot) {
-            surface.viewerRoot.classList.remove('is-shifting');
-        }
-    });
 }
 
 function shiftViewerSlots(surface, direction, nextIndex) {
@@ -1627,7 +1623,7 @@ function updateModalThumbnailSelection(index) {
 
     if (activeThumb) {
         activeThumb.scrollIntoView({
-            behavior: 'smooth',
+            behavior: 'auto',
             block: 'nearest',
             inline: 'center'
         });
