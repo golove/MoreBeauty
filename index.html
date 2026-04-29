@@ -526,6 +526,7 @@
         }
 
         .slideshow-thumbs {
+            position: relative;
             display: flex;
             gap: 8px;
             overflow-x: auto;
@@ -546,7 +547,7 @@
             overflow: hidden;
             background: rgba(255, 255, 255, 0.26);
             cursor: pointer;
-            transition: transform 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+            transition: transform 0.16s ease, opacity 0.16s ease;
         }
 
         .slideshow-thumb:hover,
@@ -556,7 +557,7 @@
         }
 
         .slideshow-thumb.is-active {
-            border-color: #ff5f9a;
+            opacity: 1;
         }
 
         .slideshow-thumb img {
@@ -564,6 +565,28 @@
             height: 100%;
             object-fit: cover;
             display: block;
+        }
+
+        .slideshow-thumb-indicator {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 2;
+            width: 56px;
+            height: 74px;
+            border: 3px solid #ff5f9a;
+            border-radius: 4px;
+            pointer-events: none;
+            transition:
+                transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+                width 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+                height 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 0.16s ease;
+            opacity: 0;
+        }
+
+        .slideshow-thumb-indicator.is-visible {
+            opacity: 1;
         }
 
         .app-message {
@@ -631,6 +654,11 @@
                 width: 48px;
                 height: 64px;
             }
+
+            .slideshow-thumb-indicator {
+                width: 48px;
+                height: 64px;
+            }
         }
     </style>
 </head>
@@ -666,7 +694,9 @@
         <button class="slideshow-nav is-prev" type="button" data-action="prev-slide" data-target="modal" aria-label="Previous image">‹</button>
         <button class="slideshow-nav is-next" type="button" data-action="next-slide" data-target="modal" aria-label="Next image">›</button>
         <div class="slideshow-filmstrip" aria-hidden="true">
-            <div id="modal-thumb-track" class="slideshow-thumbs"></div>
+            <div id="modal-thumb-track" class="slideshow-thumbs">
+                <div id="modal-thumb-indicator" class="slideshow-thumb-indicator"></div>
+            </div>
         </div>
     </div>
 </body>

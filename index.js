@@ -108,6 +108,7 @@ function createSurface(name, viewport, canvas) {
         viewerCurrentSlot: null,
         viewerNavOffset: 0,
         viewerNavAnimationFrame: 0,
+        isViewerNavigating: false,
         viewerEntryFrame: 0,
         viewerBaseX: 0,
         viewerBaseY: 0,
@@ -148,6 +149,10 @@ function bindGlobalEvents(modal, modalClose, modalBack, appTip, appTipClose) {
         }
 
         if (!state.surfaces.modal.isSlideshow) {
+            return;
+        }
+
+        if (event.repeat) {
             return;
         }
 
@@ -1065,6 +1070,10 @@ function navigateSlideshow(surface, direction, animate = false) {
         return;
     }
 
+    if (surface.isViewerNavigating) {
+        return;
+    }
+
     const nextIndex = clamp(surface.slideshowIndex + direction, 0, state.modalCards.length - 1);
 
     if (nextIndex === surface.slideshowIndex) {
@@ -1338,6 +1347,10 @@ function settleViewerSwipe(surface) {
 }
 
 function animateViewerNavigation(surface, direction) {
+    if (surface.isViewerNavigating) {
+        return;
+    }
+
     const nextIndex = clamp(surface.slideshowIndex + direction, 0, state.modalCards.length - 1);
 
     if (nextIndex === surface.slideshowIndex) {
@@ -1346,10 +1359,12 @@ function animateViewerNavigation(surface, direction) {
     }
 
     const targetOffset = -direction * surface.viewport.clientWidth;
+    surface.isViewerNavigating = true;
 
     animateViewerOffset(surface, targetOffset, () => {
         completeViewerNavigation(surface, direction, nextIndex);
         scheduleSlideshowSettle(surface);
+        surface.isViewerNavigating = false;
     });
 }
 
@@ -1433,11 +1448,13 @@ function animateViewerOffset(surface, targetOffset, onComplete = null) {
 
 function stopViewerNavigation(surface) {
     if (!surface.viewerNavAnimationFrame) {
+        surface.isViewerNavigating = false;
         return;
     }
 
     window.cancelAnimationFrame(surface.viewerNavAnimationFrame);
     surface.viewerNavAnimationFrame = 0;
+    surface.isViewerNavigating = false;
 }
 
 function animateViewerEntry(surface, sourceRect) {
@@ -1520,6 +1537,7 @@ function resetViewerState(surface) {
     surface.viewerSlots = [];
     surface.viewerCurrentSlot = null;
     surface.viewerNavOffset = 0;
+    surface.isViewerNavigating = false;
     surface.viewerBaseX = 0;
     surface.viewerBaseY = 0;
     surface.viewerBaseWidth = 0;
@@ -1553,9 +1571,10 @@ function renderModalThumbnails(album) {
         return;
     }
 
-    track.innerHTML = '';
+    track.querySelectorAll('.slideshow-thumb').forEach(thumb => thumb.remove());
 
     if (!album || !Array.isArray(album.srcs)) {
+        updateModalThumbnailSelection(-1);
         return;
     }
 
@@ -1594,6 +1613,7 @@ function renderModalThumbnails(album) {
     });
 
     track.append(...thumbs);
+    updateModalThumbnailSelection(state.surfaces.modal.isSlideshow ? state.surfaces.modal.slideshowIndex : -1);
 }
 
 function clearModalThumbnails() {
@@ -1603,17 +1623,19 @@ function clearModalThumbnails() {
         return;
     }
 
-    track.innerHTML = '';
+    track.querySelectorAll('.slideshow-thumb').forEach(thumb => thumb.remove());
+    updateModalThumbnailSelection(-1);
 }
 
 function updateModalThumbnailSelection(index) {
     const track = document.getElementById('modal-thumb-track');
+    const indicator = document.getElementById('modal-thumb-indicator');
 
-    if (!track) {
+    if (!track || !indicator) {
         return;
     }
 
-    const thumbs = Array.from(track.children);
+    const thumbs = Array.from(track.querySelectorAll('.slideshow-thumb'));
 
     thumbs.forEach((thumb, thumbIndex) => {
         thumb.classList.toggle('is-active', thumbIndex === index);
@@ -1621,13 +1643,25 @@ function updateModalThumbnailSelection(index) {
 
     const activeThumb = thumbs[index];
 
-    if (activeThumb) {
-        activeThumb.scrollIntoView({
-            behavior: 'auto',
-            block: 'nearest',
-            inline: 'center'
-        });
+    if (!activeThumb) {
+        indicator.classList.remove('is-visible');
+        return;
     }
+
+    const trackRect = track.getBoundingClientRect();
+    const thumbRect = activeThumb.getBoundingClientRect();
+    const translateX = activeThumb.offsetLeft;
+
+    indicator.style.width = `${Math.round(thumbRect.width)}px`;
+    indicator.style.height = `${Math.round(thumbRect.height)}px`;
+    indicator.style.transform = `translate3d(${Math.round(translateX)}px, 0, 0)`;
+    indicator.classList.add('is-visible');
+
+    const targetScrollLeft = activeThumb.offsetLeft - Math.max(0, (trackRect.width - thumbRect.width) / 2);
+    track.scrollTo({
+        left: targetScrollLeft,
+        behavior: 'auto'
+    });
 }
 
 function updateSlideshowBackdrop(src) {
