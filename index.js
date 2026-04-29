@@ -18,6 +18,7 @@ const SLIDESHOW_EXIT_SCALE = 2.2;
 const VIEWER_DOUBLE_TAP_SCALE = 2.6;
 const VIEWER_NAVIGATION_THRESHOLD = 64;
 const VIEWER_FRAME_MARGIN = 36;
+const VIEWER_FILMSTRIP_HEIGHT = 112;
 const VIEWER_EDGE_RESISTANCE = 0.32;
 const VIEWER_SWIPE_SETTLE_RATIO = 0.18;
 const APP_TIP_STORAGE_KEY = 'morebeauty.appTipHidden';
@@ -410,6 +411,8 @@ function renderModalGrid(album, shouldReset = true) {
     surface.isSlideshowSettled = false;
     surface.slideshowIndex = 0;
     setModalTitle(album.title || 'Untitled Album');
+    renderModalThumbnails(album);
+    updateSlideshowBackdrop('');
     syncSlideshowState(surface, modal);
 
     state.modalCards = (album.srcs || []).map((image, index) => createImageCard(image, index));
@@ -456,6 +459,8 @@ function closeModal(modal) {
     state.surfaces.modal.isSlideshowSettled = false;
     state.surfaces.modal.slideshowIndex = 0;
     setModalTitle('');
+    clearModalThumbnails();
+    updateSlideshowBackdrop('');
     syncSlideshowState(state.surfaces.modal, modal);
     setEmptySurface(state.surfaces.modal);
 }
@@ -1103,6 +1108,8 @@ function renderViewer(surface, index, options = {}) {
     }
 
     preloadAdjacentImages(state.activeAlbum, index);
+    updateSlideshowBackdrop(image.src || '');
+    updateModalThumbnailSelection(index);
     syncSlideshowState(surface, document.getElementById('modal'));
 }
 
@@ -1183,7 +1190,7 @@ function layoutViewer(surface, options = {}) {
     const frameX = VIEWER_FRAME_MARGIN;
     const frameY = MODAL_TOP_OFFSET + 32;
     const frameWidth = Math.max(220, viewportWidth - VIEWER_FRAME_MARGIN * 2);
-    const frameHeight = Math.max(160, viewportHeight - frameY - VIEWER_FRAME_MARGIN);
+    const frameHeight = Math.max(160, viewportHeight - frameY - VIEWER_FRAME_MARGIN - VIEWER_FILMSTRIP_HEIGHT);
     surface.viewerFrameX = frameX;
     surface.viewerFrameY = frameY;
     surface.viewerFrameWidth = frameWidth;
@@ -1279,6 +1286,10 @@ function clampViewerPosition(surface) {
 }
 
 function updateViewerTransforms(surface) {
+    if (surface.viewerRoot) {
+        surface.viewerRoot.classList.toggle('is-swiping', Math.abs(surface.viewerNavOffset) > 2);
+    }
+
     surface.viewerSlots.forEach(slot => {
         if (slot.classList.contains('is-hidden')) {
             slot.style.transform = 'translate3d(0px, 0px, 0) scale(1)';
@@ -1537,6 +1548,100 @@ function getModalImage(index) {
 
 function getActiveModalImage() {
     return getModalImage(state.surfaces.modal.slideshowIndex);
+}
+
+function renderModalThumbnails(album) {
+    const track = document.getElementById('modal-thumb-track');
+
+    if (!track) {
+        return;
+    }
+
+    track.innerHTML = '';
+
+    if (!album || !Array.isArray(album.srcs)) {
+        return;
+    }
+
+    const thumbs = album.srcs.map((image, index) => {
+        const button = document.createElement('button');
+        button.className = 'slideshow-thumb';
+        button.type = 'button';
+        button.setAttribute('aria-label', `Open image ${index + 1}`);
+        button.dataset.slideIndex = String(index);
+
+        const img = buildImageNode(image.src, `Thumbnail ${index + 1}`);
+        img.loading = 'lazy';
+        button.appendChild(img);
+
+        button.addEventListener('click', () => {
+            const modalSurface = state.surfaces.modal;
+
+            if (!modalSurface.isSlideshow) {
+                enterSlideshowAtIndex(modalSurface, index, state.modalCards[index] || null);
+                return;
+            }
+
+            if (index === modalSurface.slideshowIndex) {
+                return;
+            }
+
+            modalSurface.scale = 1;
+            modalSurface.x = 0;
+            modalSurface.y = 0;
+            modalSurface.viewerNavOffset = 0;
+            renderViewer(modalSurface, index);
+            scheduleSlideshowSettle(modalSurface);
+        });
+
+        return button;
+    });
+
+    track.append(...thumbs);
+}
+
+function clearModalThumbnails() {
+    const track = document.getElementById('modal-thumb-track');
+
+    if (!track) {
+        return;
+    }
+
+    track.innerHTML = '';
+}
+
+function updateModalThumbnailSelection(index) {
+    const track = document.getElementById('modal-thumb-track');
+
+    if (!track) {
+        return;
+    }
+
+    const thumbs = Array.from(track.children);
+
+    thumbs.forEach((thumb, thumbIndex) => {
+        thumb.classList.toggle('is-active', thumbIndex === index);
+    });
+
+    const activeThumb = thumbs[index];
+
+    if (activeThumb) {
+        activeThumb.scrollIntoView({
+            behavior: 'smooth',
+            block: 'nearest',
+            inline: 'center'
+        });
+    }
+}
+
+function updateSlideshowBackdrop(src) {
+    const backdrop = document.getElementById('modal-slideshow-backdrop');
+
+    if (!backdrop) {
+        return;
+    }
+
+    backdrop.style.backgroundImage = src ? `url("${src}")` : '';
 }
 
 function preloadAdjacentImages(album, index) {
